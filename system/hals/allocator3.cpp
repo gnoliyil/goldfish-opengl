@@ -24,6 +24,8 @@
 #include "types.h"
 #include "debug.h"
 
+#define OMX_COLOR_FormatYUV420Planar 19
+
 using ::android::hardware::hidl_handle;
 using ::android::hardware::hidl_vec;
 using ::android::hardware::hidl_bitfield;
@@ -292,6 +294,13 @@ private:
                 }
             }
             RETURN_ERROR(Error3::UNSUPPORTED);
+        } else if ((int)frameworkFormat == OMX_COLOR_FormatYUV420Planar &&
+               (usage & BufferUsage::GPU_DATA_BUFFER)) {
+            ALOGW("gralloc_alloc: Requested OMX_COLOR_FormatYUV420Planar, given "
+              "YCbCr_420_888, taking experimental path. "
+              "usage=%x", usage);
+            *format = PixelFormat::YCBCR_420_888;
+            RETURN(Error3::NONE);
         } else  {
             *format = frameworkFormat;
             RETURN(Error3::NONE);
@@ -399,11 +408,10 @@ private:
     }
 
     HostConnectionSession getHostConnectionSession() const {
-        return HostConnectionSession(m_hostConn);
+        return HostConnectionSession(m_hostConn.get());
     }
 
-    //std::unique_ptr<HostConnection> m_hostConn;  // b/142677230
-    HostConnection* m_hostConn;
+    std::unique_ptr<HostConnection> m_hostConn;
 };
 
 int main(int, char**) {
