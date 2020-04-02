@@ -162,7 +162,8 @@ void initHostVisibleMemoryVirtualizationInfo(
             // Was the original memory type also a device local type? If so,
             // advertise both types in resulting type bits.
             info_out->memoryTypeBitsShouldAdvertiseBoth[i] =
-                type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ||
+                type.propertyFlags == 0;
 
             ++firstFreeTypeIndex;
 
@@ -204,16 +205,6 @@ bool isDeviceLocalMemoryTypeIndexForGuest(
     return props.memoryTypes[index].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 }
 
-bool isNoFlagsMemoryTypeIndexForGuest(
-    const HostVisibleMemoryVirtualizationInfo* info,
-    uint32_t index) {
-    const auto& props =
-        info->virtualizationSupported ?
-        info->guestMemoryProperties :
-        info->hostMemoryProperties;
-    return props.memoryTypes[index].propertyFlags == 0;
-}
-
 VkResult finishHostMemAllocInit(
     VkEncoder*,
     VkDevice device,
@@ -234,7 +225,12 @@ VkResult finishHostMemAllocInit(
     // because it's not just nonCoherentAtomSize granularity,
     // people will also use it for uniform buffers, images, etc.
     // that need some bigger alignment
-#define HIGHEST_BUFFER_OR_IMAGE_ALIGNMENT 1024
+// #define HIGHEST_BUFFER_OR_IMAGE_ALIGNMENT 1024
+// bug: 145153816
+// HACK: Make it 65k so yuv images are happy on vk cts 1.2.1
+// TODO: Use a munmap/mmap MAP_FIXED scheme to realign memories
+// if it's found that the buffer or image bind alignment will be violated
+#define HIGHEST_BUFFER_OR_IMAGE_ALIGNMENT 65536
 
     uint64_t neededPageSize = out->nonCoherentAtomSize;
     if (HIGHEST_BUFFER_OR_IMAGE_ALIGNMENT >
