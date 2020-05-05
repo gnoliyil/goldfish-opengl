@@ -33,7 +33,9 @@
 #include "ClientAPIExts.h"
 #include "EGLImage.h"
 #include "ProcessPipe.h"
-#include "qemu_pipe.h"
+
+#define ALLOW_DEPRECATED_QEMU_PIPE_HEADERS
+#include <qemu_pipe.h>
 
 #include "GLEncoder.h"
 #ifdef WITH_GLES2
@@ -1714,7 +1716,6 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
     //Now make the local bind
     if (context) {
 
-        ALOGD("%s: %p: ver %d %d (tinfo %p)", __FUNCTION__, context, context->majorVersion, context->minorVersion, tInfo);
         // This is a nontrivial context.
         // The thread cannot be gralloc-only anymore.
         hostCon->setGrallocOnly(false);
@@ -1731,6 +1732,9 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
             context->getClientState();
 
         if (!hostCon->gl2Encoder()->isInitialized()) {
+            ALOGD("%s: %p: ver %d %d (tinfo %p) (first time)",
+                  __FUNCTION__,
+                  context, context->majorVersion, context->minorVersion, tInfo);
             s_display.gles2_iface()->init();
             hostCon->gl2Encoder()->setInitialized();
             ClientAPIExts::initClientFuncs(s_display.gles2_iface(), 1);
@@ -1834,6 +1838,9 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
         }
         else {
             if (!hostCon->glEncoder()->isInitialized()) {
+                ALOGD("%s: %p: ver %d %d (tinfo %p) (first time)",
+                      __FUNCTION__,
+                      context, context->majorVersion, context->minorVersion, tInfo);
                 s_display.gles_iface()->init();
                 hostCon->glEncoder()->setInitialized();
                 ClientAPIExts::initClientFuncs(s_display.gles_iface(), 0);
