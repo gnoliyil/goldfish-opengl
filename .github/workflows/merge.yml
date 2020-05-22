@@ -1,11 +1,9 @@
-# .github/workflows/example.yml
-
 name: Merge upstream branches
 on:
   schedule:
      # actually, ~5 minutes is the highest
      # effective frequency you will get
-    - cron:  '* * * * *'
+    - cron:  '5 * * * *'
 jobs:
   merge:
     runs-on: ubuntu-latest
