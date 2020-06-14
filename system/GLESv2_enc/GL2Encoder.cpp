@@ -372,6 +372,9 @@ GL2Encoder::GL2Encoder(IOStream *stream, ChecksumCalculator *protocol)
     OVERRIDE_CUSTOM(glReadnPixelsEXT);
     OVERRIDE_CUSTOM(glGetnUniformfvEXT);
     OVERRIDE_CUSTOM(glGetnUniformivEXT);
+
+    OVERRIDE(glInvalidateFramebuffer);
+    OVERRIDE(glInvalidateSubFramebuffer);
 }
 
 GL2Encoder::~GL2Encoder()
@@ -1902,7 +1905,10 @@ void GL2Encoder::s_glGetShaderSource(void *self, GLuint shader, GLsizei bufsize,
                 break;
             }
         }
-        memcpy(source, returned.substr(0, bufsize - 1).c_str(), bufsize);
+        std::string ret = returned.substr(0, bufsize - 1);
+
+        size_t toCopy = bufsize < (ret.size() + 1) ? bufsize : ret.size() + 1;
+        memcpy(source, ret.c_str(), toCopy);
     }
 }
 
@@ -4123,6 +4129,7 @@ void GL2Encoder::s_glDrawArraysInstanced(void* self, GLenum mode, GLint first, G
     assert(ctx->m_state != NULL);
     SET_ERROR_IF(!isValidDrawMode(mode), GL_INVALID_ENUM);
     SET_ERROR_IF(count < 0, GL_INVALID_VALUE);
+    SET_ERROR_IF(primcount < 0, GL_INVALID_VALUE);
 
     bool has_client_vertex_arrays = false;
     bool has_indirect_arrays = false;
@@ -4148,6 +4155,7 @@ void GL2Encoder::s_glDrawElementsInstanced(void* self, GLenum mode, GLsizei coun
     assert(ctx->m_state != NULL);
     SET_ERROR_IF(!isValidDrawMode(mode), GL_INVALID_ENUM);
     SET_ERROR_IF(count < 0, GL_INVALID_VALUE);
+    SET_ERROR_IF(primcount < 0, GL_INVALID_VALUE);
     SET_ERROR_IF(!(type == GL_UNSIGNED_BYTE || type == GL_UNSIGNED_SHORT || type == GL_UNSIGNED_INT), GL_INVALID_ENUM);
     SET_ERROR_IF(ctx->m_state->getTransformFeedbackActiveUnpaused(), GL_INVALID_OPERATION);
 
@@ -5435,4 +5443,18 @@ void GL2Encoder::s_glGetnUniformivEXT(void *self, GLuint program, GLint location
     SET_ERROR_IF(bufSize < glSizeof(glesv2_enc::uniformType(self, program,
         location)), GL_INVALID_OPERATION);
     s_glGetUniformiv(self, program, location, params);
+}
+
+void GL2Encoder::s_glInvalidateFramebuffer(void* self, GLenum target, GLsizei numAttachments, const GLenum *attachments) {
+    GL2Encoder *ctx = (GL2Encoder*)self;
+    SET_ERROR_IF(numAttachments < 0, GL_INVALID_VALUE);
+    ctx->m_glInvalidateFramebuffer_enc(ctx, target, numAttachments, attachments);
+}
+
+void GL2Encoder::s_glInvalidateSubFramebuffer(void* self, GLenum target, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height) {
+    GL2Encoder *ctx = (GL2Encoder*)self;
+    SET_ERROR_IF(numAttachments < 0, GL_INVALID_VALUE);
+    SET_ERROR_IF(width < 0, GL_INVALID_VALUE);
+    SET_ERROR_IF(height < 0, GL_INVALID_VALUE);
+    ctx->m_glInvalidateSubFramebuffer_enc(ctx, target, numAttachments, attachments, x, y, width, height);
 }
