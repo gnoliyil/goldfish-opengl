@@ -275,6 +275,11 @@ public:
         uint32_t sequenceNumber = 0;
     };
 
+    struct VkQueue_Info {
+        VkEncoder** lastUsedEncoderPtr = nullptr;
+        uint32_t sequenceNumber = 0;
+    };
+
     // custom guest-side structs for images/buffers because of AHardwareBuffer :((
     struct VkImage_Info {
         VkDevice device;
@@ -394,11 +399,29 @@ public:
             *(info.lastUsedEncoderPtr) : nullptr;
 
         if (lastUsedEncoder) {
-            lastUsedEncoder->unregisterCleanupCallback(commandBuffer);
             delete info.lastUsedEncoderPtr;
+            info.lastUsedEncoderPtr = nullptr;
         }
 
         info_VkCommandBuffer.erase(commandBuffer);
+    }
+
+    void unregister_VkQueue(VkQueue queue) {
+        AutoLock lock(mLock);
+
+        auto it = info_VkQueue.find(queue);
+        if (it == info_VkQueue.end()) return;
+        auto& info = it->second;
+        auto lastUsedEncoder =
+            info.lastUsedEncoderPtr ?
+            *(info.lastUsedEncoderPtr) : nullptr;
+
+        if (lastUsedEncoder) {
+            delete info.lastUsedEncoderPtr;
+            info.lastUsedEncoderPtr = nullptr;
+        }
+
+        info_VkQueue.erase(queue);
     }
 
     void unregister_VkDeviceMemory(VkDeviceMemory mem) {
@@ -837,6 +860,11 @@ public:
     bool supportsDeferredCommands() const {
         if (!mFeatureInfo) return false;
         return mFeatureInfo->hasDeferredVulkanCommands;
+    }
+
+    bool supportsAsyncQueueSubmit() const {
+        if (!mFeatureInfo) return false;
+        return mFeatureInfo->hasVulkanAsyncQueueSubmit;
     }
 
     bool supportsCreateResourcesWithRequirements() const {
@@ -4101,8 +4129,13 @@ public:
         lock.unlock();
 
         if (pre_signal_semaphores.empty()) {
-            input_result = enc->vkQueueSubmit(queue, submitCount, pSubmits, fence);
-            if (input_result != VK_SUCCESS) return input_result;
+            if (supportsAsyncQueueSubmit()) {
+                enc->vkQueueSubmitAsyncGOOGLE(queue, submitCount, pSubmits, fence);
+                input_result = VK_SUCCESS;
+            } else {
+                input_result = enc->vkQueueSubmit(queue, submitCount, pSubmits, fence);
+                if (input_result != VK_SUCCESS) return input_result;
+            }
         } else {
             // Schedule waits on the OS external objects and
             // signal the wait semaphores
@@ -4137,10 +4170,20 @@ public:
                 .pWaitDstStageMask = nullptr,
                 .signalSemaphoreCount = static_cast<uint32_t>(pre_signal_semaphores.size()),
                 .pSignalSemaphores = pre_signal_semaphores.data()};
-            enc->vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
 
-            input_result = enc->vkQueueSubmit(queue, submitCount, pSubmits, fence);
-            if (input_result != VK_SUCCESS) return input_result;
+            if (supportsAsyncQueueSubmit()) {
+                enc->vkQueueSubmitAsyncGOOGLE(queue, 1, &submit_info, VK_NULL_HANDLE);
+            } else {
+                enc->vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+            }
+
+            if (supportsAsyncQueueSubmit()) {
+                enc->vkQueueSubmitAsyncGOOGLE(queue, submitCount, pSubmits, fence);
+                input_result = VK_SUCCESS;
+            } else {
+                input_result = enc->vkQueueSubmit(queue, submitCount, pSubmits, fence);
+                if (input_result != VK_SUCCESS) return input_result;
+            }
         }
 
         lock.lock();
@@ -4587,6 +4630,31 @@ public:
             physicalDevice, pImageFormatInfo, pImageFormatProperties);
     }
 
+    void registerEncoderCleanupCallback(const VkEncoder* encoder, void* object, CleanupCallback callback) {
+        AutoLock lock(mLock);
+        auto& callbacks = mEncoderCleanupCallbacks[encoder];
+        callbacks[object] = callback;
+    }
+    
+    void unregisterEncoderCleanupCallback(const VkEncoder* encoder, void* object) {
+        AutoLock lock(mLock);
+        mEncoderCleanupCallbacks[encoder].erase(object);
+    }
+
+    void onEncoderDeleted(const VkEncoder* encoder) {
+        AutoLock lock(mLock);
+        if (mEncoderCleanupCallbacks.find(encoder) == mEncoderCleanupCallbacks.end()) return;
+
+        std::unordered_map<void*, CleanupCallback> callbackCopies = mEncoderCleanupCallbacks[encoder];
+
+        mEncoderCleanupCallbacks.erase(encoder);
+        lock.unlock();
+
+        for (auto it : callbackCopies) {
+            it.second();
+        }
+    }
+
     uint32_t syncEncodersForCommandBuffer(VkCommandBuffer commandBuffer, VkEncoder* currentEncoder) {
         AutoLock lock(mLock);
 
@@ -4612,17 +4680,87 @@ public:
         if (!lastEncoder) return 0;
         if (lastEncoder == currentEncoder) return 0;
 
-        info.sequenceNumber++;
-        lastEncoder->vkCommandBufferHostSyncGOOGLE(commandBuffer, false, info.sequenceNumber);
+        auto oldSeq = info.sequenceNumber;
+
+        lock.unlock();
+
+        lastEncoder->vkCommandBufferHostSyncGOOGLE(commandBuffer, false, oldSeq + 1);
         lastEncoder->flush();
-        info.sequenceNumber++;
-        currentEncoder->vkCommandBufferHostSyncGOOGLE(commandBuffer, true, info.sequenceNumber);
+        currentEncoder->vkCommandBufferHostSyncGOOGLE(commandBuffer, true, oldSeq + 2);
 
-        lastEncoder->unregisterCleanupCallback(commandBuffer);
+        unregisterEncoderCleanupCallback(lastEncoder, commandBuffer);
 
-        currentEncoder->registerCleanupCallback(commandBuffer, [currentEncoder, lastUsedEncoderPtr]() {
-            if (*(lastUsedEncoderPtr) == currentEncoder) {
-                *(lastUsedEncoderPtr) = nullptr;
+        registerEncoderCleanupCallback(currentEncoder, commandBuffer, [this, currentEncoder, commandBuffer]() {
+            AutoLock lock(mLock);
+            auto it = info_VkCommandBuffer.find(commandBuffer);
+            if (it == info_VkCommandBuffer.end()) return;
+
+            auto& info = it->second;
+            if (!info.lastUsedEncoderPtr) return;
+            if (!*(info.lastUsedEncoderPtr)) return;
+
+            if (currentEncoder == *(info.lastUsedEncoderPtr)) {
+                *(info.lastUsedEncoderPtr) = nullptr;
+            }
+        });
+
+        return 1;
+    }
+
+    uint32_t syncEncodersForQueue(VkQueue queue, VkEncoder* currentEncoder) {
+        if (!supportsAsyncQueueSubmit()) {
+            return 0;
+        }
+
+        AutoLock lock(mLock);
+
+        auto it = info_VkQueue.find(queue);
+        if (it == info_VkQueue.end()) return 0;
+
+        auto& info = it->second;
+
+        if (!info.lastUsedEncoderPtr) {
+            info.lastUsedEncoderPtr = new VkEncoder*;
+            *(info.lastUsedEncoderPtr) = currentEncoder;
+        }
+
+        auto lastUsedEncoderPtr = info.lastUsedEncoderPtr;
+
+        auto lastEncoder = *(lastUsedEncoderPtr);
+
+        // We always make lastUsedEncoderPtr track
+        // the current encoder, even if the last encoder
+        // is null.
+        *(lastUsedEncoderPtr) = currentEncoder;
+
+        if (!lastEncoder) return 0;
+        if (lastEncoder == currentEncoder) return 0;
+
+        auto oldSeq = info.sequenceNumber;
+
+        info.sequenceNumber += 2;
+
+        lock.unlock();
+
+        // at this point the seqno for the old thread is determined
+
+        lastEncoder->vkQueueHostSyncGOOGLE(queue, false, oldSeq + 1);
+        lastEncoder->flush();
+        currentEncoder->vkQueueHostSyncGOOGLE(queue, true, oldSeq + 2);
+
+        unregisterEncoderCleanupCallback(lastEncoder, queue);
+
+        registerEncoderCleanupCallback(currentEncoder, queue, [this, currentEncoder, queue]() {
+            AutoLock lock(mLock);
+            auto it = info_VkQueue.find(queue);
+            if (it == info_VkQueue.end()) return;
+
+            auto& info = it->second;
+            if (!info.lastUsedEncoderPtr) return;
+            if (!*(info.lastUsedEncoderPtr)) return;
+
+            if (currentEncoder == *(info.lastUsedEncoderPtr)) {
+                *(info.lastUsedEncoderPtr) = nullptr;
             }
         });
 
@@ -4773,6 +4911,9 @@ private:
     WorkPool mWorkPool { 4 };
     std::unordered_map<VkQueue, std::vector<WorkPool::WaitGroupHandle>>
         mQueueSensitiveWorkPoolItems;
+
+    std::unordered_map<const VkEncoder*, std::unordered_map<void*, CleanupCallback>> mEncoderCleanupCallbacks;
+
 };
 
 ResourceTracker::ResourceTracker() : mImpl(new ResourceTracker::Impl()) { }
@@ -5556,9 +5697,26 @@ VkResult ResourceTracker::on_vkGetPhysicalDeviceImageFormatProperties2KHR(
         pImageFormatProperties);
 }
 
+void ResourceTracker::registerEncoderCleanupCallback(const VkEncoder* encoder, void* handle, ResourceTracker::CleanupCallback callback) {
+    mImpl->registerEncoderCleanupCallback(encoder, handle, callback);
+}
+
+void ResourceTracker::unregisterEncoderCleanupCallback(const VkEncoder* encoder, void* handle) {
+    mImpl->unregisterEncoderCleanupCallback(encoder, handle);
+}
+
+void ResourceTracker::onEncoderDeleted(const VkEncoder* encoder) {
+    mImpl->onEncoderDeleted(encoder);
+}
+
 uint32_t ResourceTracker::syncEncodersForCommandBuffer(VkCommandBuffer commandBuffer, VkEncoder* current) {
     return mImpl->syncEncodersForCommandBuffer(commandBuffer, current);
 }
+
+uint32_t ResourceTracker::syncEncodersForQueue(VkQueue queue, VkEncoder* current) {
+    return mImpl->syncEncodersForQueue(queue, current);
+}
+
 
 VkResult ResourceTracker::on_vkBeginCommandBuffer(
     void* context, VkResult input_result,
