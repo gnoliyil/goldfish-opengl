@@ -28,7 +28,6 @@
 
 
 #include "goldfish_vk_private_defs.h"
-#include <functional>
 #include <memory>
 class IOStream;
 
@@ -42,10 +41,8 @@ public:
     ~VkEncoder();
 
     void flush();
-
-    using CleanupCallback = std::function<void()>;
-    void registerCleanupCallback(void* handle, CleanupCallback cb);
-    void unregisterCleanupCallback(void* handle);
+    void lock();
+    void unlock();
 #ifdef VK_VERSION_1_0
     VkResult vkCreateInstance(
     const VkInstanceCreateInfo* pCreateInfo,
@@ -1822,6 +1819,24 @@ public:
     VkDevice device,
         VkDeviceMemory memory,
         const VkAllocationCallbacks* pAllocator);
+#endif
+#ifdef VK_GOOGLE_async_queue_submit
+    void vkQueueHostSyncGOOGLE(
+    VkQueue queue,
+        uint32_t needHostSync,
+        uint32_t sequenceNumber);
+    void vkQueueSubmitAsyncGOOGLE(
+    VkQueue queue,
+        uint32_t submitCount,
+        const VkSubmitInfo* pSubmits,
+        VkFence fence);
+    void vkQueueWaitIdleAsyncGOOGLE(
+    VkQueue queue);
+    void vkQueueBindSparseAsyncGOOGLE(
+    VkQueue queue,
+        uint32_t bindInfoCount,
+        const VkBindSparseInfo* pBindInfo,
+        VkFence fence);
 #endif
 
 private:
