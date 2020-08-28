@@ -50,6 +50,7 @@ void zx_event_create(int, zx_handle_t*) { }
 #include <fuchsia/sysmem/llcpp/fidl.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/vmo.h>
+#include <zircon/errors.h>
 #include <zircon/process.h>
 #include <zircon/syscalls.h>
 #include <zircon/syscalls/object.h>
@@ -2102,9 +2103,9 @@ public:
                     abort();
                 }
 
-                struct drm_virtgpu_map map_info = {
-                    .handle = drm_rc_blob.bo_handle,
-                };
+                drm_virtgpu_map map_info;
+                memset(&map_info, 0, sizeof(map_info));
+                map_info.handle = drm_rc_blob.bo_handle;
 
                 res = drmIoctl(mRendernodeFd, DRM_IOCTL_VIRTGPU_MAP, &map_info);
                 if (res) {
@@ -2469,6 +2470,11 @@ public:
                 if (hasDedicatedImage) {
                     VkResult res = setBufferCollectionConstraints(
                         &collection, pImageCreateInfo);
+                    if (res == VK_ERROR_FORMAT_NOT_SUPPORTED) {
+                      ALOGE("setBufferCollectionConstraints failed: format %u is not supported",
+                            pImageCreateInfo->format);
+                      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
                     if (res != VK_SUCCESS) {
                         ALOGE("setBufferCollectionConstraints failed: %d", res);
                         abort();
@@ -2559,9 +2565,16 @@ public:
                     auto result = mControlDevice->CreateColorBuffer2(std::move(vmo_copy),
                                                                      std::move(createParams));
                     if (!result.ok() || result.Unwrap()->res != ZX_OK) {
-                        ALOGE("CreateColorBuffer failed: %d:%d",
-                              result.status(), GET_STATUS_SAFE(result, res));
-                        abort();
+                        if (result.ok() &&
+                            result.Unwrap()->res == ZX_ERR_ALREADY_EXISTS) {
+                            ALOGD("CreateColorBuffer: color buffer already "
+                                  "exists\n");
+                        } else {
+                            ALOGE("CreateColorBuffer failed: %d:%d",
+                                  result.status(),
+                                  GET_STATUS_SAFE(result, res));
+                            abort();
+                        }
                     }
                 }
 
@@ -3031,8 +3044,13 @@ public:
               auto result =
                   mControlDevice->CreateColorBuffer2(std::move(vmo), std::move(createParams));
               if (!result.ok() || result.Unwrap()->res != ZX_OK) {
-                ALOGE("CreateColorBuffer failed: %d:%d", result.status(),
-                      GET_STATUS_SAFE(result, res));
+                  if (result.ok() &&
+                      result.Unwrap()->res == ZX_ERR_ALREADY_EXISTS) {
+                      ALOGD("CreateColorBuffer: color buffer already exists");
+                  } else {
+                      ALOGE("CreateColorBuffer failed: %d:%d", result.status(),
+                            GET_STATUS_SAFE(result, res));
+                  }
                 }
             }
             isSysmemBackedMemory = true;
@@ -4700,6 +4718,35 @@ public:
 
         VkEncoder* enc = (VkEncoder*)context;
         (void)input_result;
+
+#ifdef VK_USE_PLATFORM_FUCHSIA
+
+        constexpr VkFormat kExternalImageSupportedFormats[] = {
+            VK_FORMAT_B8G8R8A8_SINT,
+            VK_FORMAT_B8G8R8A8_UNORM,
+            VK_FORMAT_B8G8R8A8_SRGB,
+            VK_FORMAT_B8G8R8A8_SNORM,
+            VK_FORMAT_B8G8R8A8_SSCALED,
+            VK_FORMAT_B8G8R8A8_USCALED,
+            VK_FORMAT_R8G8B8A8_SINT,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_R8G8B8A8_SRGB,
+            VK_FORMAT_R8G8B8A8_SNORM,
+            VK_FORMAT_R8G8B8A8_SSCALED,
+            VK_FORMAT_R8G8B8A8_USCALED,
+        };
+
+        VkExternalImageFormatProperties* ext_img_properties =
+            vk_find_struct<VkExternalImageFormatProperties>(pImageFormatProperties);
+
+        if (ext_img_properties) {
+          if (std::find(std::begin(kExternalImageSupportedFormats),
+                        std::end(kExternalImageSupportedFormats),
+                        pImageFormatInfo->format) == std::end(kExternalImageSupportedFormats)) {
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          }
+        }
+#endif
 
         VkAndroidHardwareBufferUsageANDROID* output_ahw_usage =
             vk_find_struct<VkAndroidHardwareBufferUsageANDROID>(pImageFormatProperties);
