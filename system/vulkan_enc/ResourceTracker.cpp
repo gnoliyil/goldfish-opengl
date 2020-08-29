@@ -50,6 +50,7 @@ void zx_event_create(int, zx_handle_t*) { }
 #include <fuchsia/sysmem/llcpp/fidl.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/vmo.h>
+#include <zircon/errors.h>
 #include <zircon/process.h>
 #include <zircon/syscalls.h>
 #include <zircon/syscalls/object.h>
@@ -402,7 +403,7 @@ public:
             *(info.lastUsedEncoderPtr) : nullptr;
 
         if (lastUsedEncoder) {
-            delete info.lastUsedEncoderPtr;
+            lastUsedEncoder->decRef();
             info.lastUsedEncoderPtr = nullptr;
         }
 
@@ -420,7 +421,7 @@ public:
             *(info.lastUsedEncoderPtr) : nullptr;
 
         if (lastUsedEncoder) {
-            delete info.lastUsedEncoderPtr;
+            lastUsedEncoder->decRef();
             info.lastUsedEncoderPtr = nullptr;
         }
 
@@ -2469,6 +2470,11 @@ public:
                 if (hasDedicatedImage) {
                     VkResult res = setBufferCollectionConstraints(
                         &collection, pImageCreateInfo);
+                    if (res == VK_ERROR_FORMAT_NOT_SUPPORTED) {
+                      ALOGE("setBufferCollectionConstraints failed: format %u is not supported",
+                            pImageCreateInfo->format);
+                      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                    }
                     if (res != VK_SUCCESS) {
                         ALOGE("setBufferCollectionConstraints failed: %d", res);
                         abort();
@@ -2559,9 +2565,16 @@ public:
                     auto result = mControlDevice->CreateColorBuffer2(std::move(vmo_copy),
                                                                      std::move(createParams));
                     if (!result.ok() || result.Unwrap()->res != ZX_OK) {
-                        ALOGE("CreateColorBuffer failed: %d:%d",
-                              result.status(), GET_STATUS_SAFE(result, res));
-                        abort();
+                        if (result.ok() &&
+                            result.Unwrap()->res == ZX_ERR_ALREADY_EXISTS) {
+                            ALOGD("CreateColorBuffer: color buffer already "
+                                  "exists\n");
+                        } else {
+                            ALOGE("CreateColorBuffer failed: %d:%d",
+                                  result.status(),
+                                  GET_STATUS_SAFE(result, res));
+                            abort();
+                        }
                     }
                 }
 
@@ -3031,8 +3044,13 @@ public:
               auto result =
                   mControlDevice->CreateColorBuffer2(std::move(vmo), std::move(createParams));
               if (!result.ok() || result.Unwrap()->res != ZX_OK) {
-                ALOGE("CreateColorBuffer failed: %d:%d", result.status(),
-                      GET_STATUS_SAFE(result, res));
+                  if (result.ok() &&
+                      result.Unwrap()->res == ZX_ERR_ALREADY_EXISTS) {
+                      ALOGD("CreateColorBuffer: color buffer already exists");
+                  } else {
+                      ALOGE("CreateColorBuffer failed: %d:%d", result.status(),
+                            GET_STATUS_SAFE(result, res));
+                  }
                 }
             }
             isSysmemBackedMemory = true;
@@ -4701,6 +4719,35 @@ public:
         VkEncoder* enc = (VkEncoder*)context;
         (void)input_result;
 
+#ifdef VK_USE_PLATFORM_FUCHSIA
+
+        constexpr VkFormat kExternalImageSupportedFormats[] = {
+            VK_FORMAT_B8G8R8A8_SINT,
+            VK_FORMAT_B8G8R8A8_UNORM,
+            VK_FORMAT_B8G8R8A8_SRGB,
+            VK_FORMAT_B8G8R8A8_SNORM,
+            VK_FORMAT_B8G8R8A8_SSCALED,
+            VK_FORMAT_B8G8R8A8_USCALED,
+            VK_FORMAT_R8G8B8A8_SINT,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_R8G8B8A8_SRGB,
+            VK_FORMAT_R8G8B8A8_SNORM,
+            VK_FORMAT_R8G8B8A8_SSCALED,
+            VK_FORMAT_R8G8B8A8_USCALED,
+        };
+
+        VkExternalImageFormatProperties* ext_img_properties =
+            vk_find_struct<VkExternalImageFormatProperties>(pImageFormatProperties);
+
+        if (ext_img_properties) {
+          if (std::find(std::begin(kExternalImageSupportedFormats),
+                        std::end(kExternalImageSupportedFormats),
+                        pImageFormatInfo->format) == std::end(kExternalImageSupportedFormats)) {
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          }
+        }
+#endif
+
         VkAndroidHardwareBufferUsageANDROID* output_ahw_usage =
             vk_find_struct<VkAndroidHardwareBufferUsageANDROID>(pImageFormatProperties);
 
@@ -4784,6 +4831,7 @@ public:
         if (!info.lastUsedEncoderPtr) {
             info.lastUsedEncoderPtr = new VkEncoder*;
             *(info.lastUsedEncoderPtr) = currentEncoder;
+            currentEncoder->incRef();
         }
 
         auto lastUsedEncoderPtr = info.lastUsedEncoderPtr;
@@ -4792,8 +4840,13 @@ public:
 
         // We always make lastUsedEncoderPtr track
         // the current encoder, even if the last encoder
-        // is null.
+        // is null. And also, increment the current encoder,
+        // and decrement refcount for the last one.
+        // (Decrement only after we are done)
         *(lastUsedEncoderPtr) = currentEncoder;
+        if (lastEncoder != currentEncoder) {
+            currentEncoder->incRef();
+        }
 
         if (!lastEncoder) return 0;
         if (lastEncoder == currentEncoder) return 0;
@@ -4804,23 +4857,11 @@ public:
 
         lastEncoder->vkCommandBufferHostSyncGOOGLE(commandBuffer, false, oldSeq + 1);
         lastEncoder->flush();
+
         currentEncoder->vkCommandBufferHostSyncGOOGLE(commandBuffer, true, oldSeq + 2);
 
-        unregisterEncoderCleanupCallback(lastEncoder, commandBuffer);
-
-        registerEncoderCleanupCallback(currentEncoder, commandBuffer, [this, currentEncoder, commandBuffer]() {
-            AutoLock lock(mLock);
-            auto it = info_VkCommandBuffer.find(commandBuffer);
-            if (it == info_VkCommandBuffer.end()) return;
-
-            auto& info = it->second;
-            if (!info.lastUsedEncoderPtr) return;
-            if (!*(info.lastUsedEncoderPtr)) return;
-
-            if (currentEncoder == *(info.lastUsedEncoderPtr)) {
-                *(info.lastUsedEncoderPtr) = nullptr;
-            }
-        });
+        lock.lock();
+        if (lastEncoder->decRef()) { *lastUsedEncoderPtr = nullptr; }
 
         return 1;
     }
@@ -4840,6 +4881,7 @@ public:
         if (!info.lastUsedEncoderPtr) {
             info.lastUsedEncoderPtr = new VkEncoder*;
             *(info.lastUsedEncoderPtr) = currentEncoder;
+            currentEncoder->incRef();
         }
 
         auto lastUsedEncoderPtr = info.lastUsedEncoderPtr;
@@ -4850,6 +4892,10 @@ public:
         // the current encoder, even if the last encoder
         // is null.
         *(lastUsedEncoderPtr) = currentEncoder;
+
+        if (lastEncoder != currentEncoder) {
+            currentEncoder->incRef();
+        }
 
         if (!lastEncoder) return 0;
         if (lastEncoder == currentEncoder) return 0;
@@ -4866,21 +4912,8 @@ public:
         lastEncoder->flush();
         currentEncoder->vkQueueHostSyncGOOGLE(queue, true, oldSeq + 2);
 
-        unregisterEncoderCleanupCallback(lastEncoder, queue);
-
-        registerEncoderCleanupCallback(currentEncoder, queue, [this, currentEncoder, queue]() {
-            AutoLock lock(mLock);
-            auto it = info_VkQueue.find(queue);
-            if (it == info_VkQueue.end()) return;
-
-            auto& info = it->second;
-            if (!info.lastUsedEncoderPtr) return;
-            if (!*(info.lastUsedEncoderPtr)) return;
-
-            if (currentEncoder == *(info.lastUsedEncoderPtr)) {
-                *(info.lastUsedEncoderPtr) = nullptr;
-            }
-        });
+        lock.lock();
+        if (lastEncoder->decRef()) { *lastUsedEncoderPtr = nullptr; }
 
         return 1;
     }
