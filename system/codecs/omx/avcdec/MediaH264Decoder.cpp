@@ -47,8 +47,9 @@ void MediaH264Decoder::initH264Context(unsigned int width,
             ALOGE("ERROR: Failed to initH264Context: cannot get memory slot");
             return;
         }
-        mAddressOffSet = static_cast<unsigned int>(slot) * 8 * (1 << 20);
-        DDD("got memory lot %d addrr %x", slot, mAddressOffSet);
+        mSlot = slot;
+        mAddressOffSet = static_cast<unsigned int>(mSlot) * (1 << 20);
+        DDD("got memory lot %d addrr %x", mSlot, mAddressOffSet);
         mHasAddressSpaceMemory = true;
     }
     transport->writeParam(mVersion, 0, mAddressOffSet);
@@ -94,7 +95,7 @@ void MediaH264Decoder::destroyH264Context() {
     transport->writeParam((uint64_t)mHostHandle, 0, mAddressOffSet);
     transport->sendOperation(MediaCodecType::H264Codec,
                              MediaOperation::DestroyContext, mAddressOffSet);
-    transport->returnMemorySlot(mAddressOffSet >> 23);
+    transport->returnMemorySlot(mSlot);
     mHasAddressSpaceMemory = false;
 }
 
@@ -157,7 +158,7 @@ h264_image_t MediaH264Decoder::getImage() {
         res.data = dst;
         res.width = *(uint32_t*)(retptr + 8);
         res.height = *(uint32_t*)(retptr + 16);
-        res.pts = *(uint32_t*)(retptr + 24);
+        res.pts = *(uint64_t*)(retptr + 24);
         res.color_primaries = *(uint32_t*)(retptr + 32);
         res.color_range = *(uint32_t*)(retptr + 40);
         res.color_trc = *(uint32_t*)(retptr + 48);
@@ -195,7 +196,7 @@ h264_image_t MediaH264Decoder::renderOnHostAndReturnImageMetadata(int hostColorB
         res.data = dst; // note: the data could be junk
         res.width = *(uint32_t*)(retptr + 8);
         res.height = *(uint32_t*)(retptr + 16);
-        res.pts = *(uint32_t*)(retptr + 24);
+        res.pts = *(uint64_t*)(retptr + 24);
         res.color_primaries = *(uint32_t*)(retptr + 32);
         res.color_range = *(uint32_t*)(retptr + 40);
         res.color_trc = *(uint32_t*)(retptr + 48);
