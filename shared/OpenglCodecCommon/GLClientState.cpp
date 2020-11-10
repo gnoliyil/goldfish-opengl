@@ -39,6 +39,24 @@
 void GLClientState::init() {
     m_initialized = false;
 
+    state_GL_STENCIL_TEST = false;
+    state_GL_STENCIL_FUNC = GL_ALWAYS;
+    state_GL_STENCIL_VALUE_MASK = ~(0);
+    state_GL_STENCIL_REF = 0;
+    state_GL_STENCIL_FAIL = GL_KEEP;
+    state_GL_STENCIL_PASS_DEPTH_FAIL = GL_KEEP;
+    state_GL_STENCIL_PASS_DEPTH_PASS = GL_KEEP;
+    state_GL_STENCIL_BACK_FUNC = GL_ALWAYS;
+    state_GL_STENCIL_BACK_VALUE_MASK = ~(0);
+    state_GL_STENCIL_BACK_REF = 0;
+    state_GL_STENCIL_BACK_FAIL = GL_KEEP;
+    state_GL_STENCIL_BACK_PASS_DEPTH_FAIL = GL_KEEP;
+    state_GL_STENCIL_BACK_PASS_DEPTH_PASS = GL_KEEP;
+    state_GL_STENCIL_WRITEMASK = ~(0);
+    state_GL_STENCIL_BACK_WRITEMASK = ~(0);
+    state_GL_STENCIL_CLEAR_VALUE = 0;
+
+
     m_arrayBuffer = 0;
     m_arrayBuffer_lastEncode = 0;
 
@@ -1816,7 +1834,11 @@ GLenum GLClientState::checkFramebufferCompleteness(GLenum target) {
     }
 
     if (!hasAttachment) {
-        return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+        // Framebuffers may be missing an attachment if they have nonzero
+        // default width and height
+        if (props.defaultWidth == 0 || props.defaultHeight == 0) {
+            return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+        }
     }
 
     props.completenessDirty = false;
@@ -2532,6 +2554,19 @@ void GLClientState::setCheckFramebufferStatus(GLenum target, GLenum status) {
     }
 }
 
+void GLClientState::setFramebufferParameter(GLenum target, GLenum pname, GLint param) {
+    switch (pname) {
+        case GL_FRAMEBUFFER_DEFAULT_WIDTH:
+            boundFboProps(target).defaultWidth = param;
+            boundFboProps(target).completenessDirty = true;
+            break;
+        case GL_FRAMEBUFFER_DEFAULT_HEIGHT:
+            boundFboProps(target).defaultHeight = param;
+            boundFboProps(target).completenessDirty = true;
+            break;
+    }
+}
+
 GLenum GLClientState::getCheckFramebufferStatus(GLenum target) const {
     switch (target) {
     case GL_DRAW_FRAMEBUFFER:
@@ -2920,6 +2955,44 @@ bool GLClientState::getTransformFeedbackActiveUnpaused() const {
 
 uint32_t GLClientState::getTransformFeedbackVaryingsCountForLinking() const {
     return m_transformFeedbackVaryingsCountForLinking;
+}
+
+void GLClientState::stencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
+    if (face == GL_FRONT || face == GL_FRONT_AND_BACK) {
+        state_GL_STENCIL_FUNC = func;
+        state_GL_STENCIL_REF = ref;
+        state_GL_STENCIL_VALUE_MASK = mask;
+    }
+
+    if (face == GL_BACK || face == GL_FRONT_AND_BACK) {
+        state_GL_STENCIL_BACK_FUNC = func;
+        state_GL_STENCIL_BACK_REF = ref;
+        state_GL_STENCIL_BACK_VALUE_MASK = mask;
+    }
+}
+
+void GLClientState::stencilMaskSeparate(GLenum face, GLuint mask) {
+    if (face == GL_FRONT || face == GL_FRONT_AND_BACK) {
+        state_GL_STENCIL_WRITEMASK = mask;
+    }
+
+    if (face == GL_BACK || face == GL_FRONT_AND_BACK) {
+        state_GL_STENCIL_BACK_WRITEMASK = mask;
+    }
+}
+
+void GLClientState::stencilOpSeparate(GLenum face, GLenum fail, GLenum zfail, GLenum zpass) {
+    if (face == GL_FRONT || face == GL_FRONT_AND_BACK) {
+        state_GL_STENCIL_FAIL = fail;
+        state_GL_STENCIL_PASS_DEPTH_FAIL = zfail;
+        state_GL_STENCIL_PASS_DEPTH_PASS = zpass;
+    }
+
+    if (face == GL_BACK || face == GL_FRONT_AND_BACK) {
+        state_GL_STENCIL_BACK_FAIL = fail;
+        state_GL_STENCIL_BACK_PASS_DEPTH_FAIL = zfail;
+        state_GL_STENCIL_BACK_PASS_DEPTH_PASS = zpass;
+    }
 }
 
 void GLClientState::setTextureData(SharedTextureDataMap* sharedTexData) {
