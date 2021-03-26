@@ -463,6 +463,22 @@ HWC2::Error GuestComposer::createDisplays(
     displayInfo.compositionResultDrmBuffer = std::make_unique<DrmBuffer>(
         displayInfo.compositionResultBuffer, mDrmPresenter);
 
+    if (displayId == 0) {
+      int flushSyncFd = -1;
+
+      HWC2::Error flushError =
+          displayInfo.compositionResultDrmBuffer->flush(&flushSyncFd);
+      if (flushError != HWC2::Error::None) {
+        ALOGW(
+            "%s: Initial display flush failed. HWComposer assuming that we are "
+            "running in QEMU without a display and disabling presenting.",
+            __FUNCTION__);
+        mPresentDisabled = true;
+      } else {
+        close(flushSyncFd);
+      }
+    }
+
     error = addDisplayToDeviceFn(std::move(display));
     if (error != HWC2::Error::None) {
       ALOGE("%s failed to add display:%" PRIu64, __FUNCTION__, displayId);
@@ -662,6 +678,16 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
   const auto displayId = display->getId();
   DEBUG_LOG("%s display:%" PRIu64, __FUNCTION__, displayId);
 
+
+  if (displayId != 0) {
+    // TODO(b/171305898): remove after multi-display fully supported.
+    return HWC2::Error::None;
+  }
+
+  if (mPresentDisabled) {
+    return HWC2::Error::None;
+  }
+
   auto it = mDisplayInfos.find(displayId);
   if (it == mDisplayInfos.end()) {
     ALOGE("%s: display:%" PRIu64 " not found", __FUNCTION__, displayId);
@@ -738,12 +764,12 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
       continue;
     }
 
-    HWC2::Error error = composerLayerInto(layer,                          //
-                                          compositionResultBufferData,    //
-                                          compositionResultBufferWidth,   //
-                                          compositionResultBufferHeight,  //
-                                          compositionResultBufferStride,  //
-                                          4);
+    HWC2::Error error = composeLayerInto(layer,                          //
+                                         compositionResultBufferData,    //
+                                         compositionResultBufferWidth,   //
+                                         compositionResultBufferHeight,  //
+                                         compositionResultBufferStride,  //
+                                         4);
     if (error != HWC2::Error::None) {
       ALOGE("%s: display:%" PRIu64 " failed to compose layer:%" PRIu64,
             __FUNCTION__, displayId, layerId);
@@ -753,9 +779,14 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
 
   DEBUG_LOG("%s display:%" PRIu64 " flushing drm buffer", __FUNCTION__,
             displayId);
-  *outRetireFence = displayInfo.compositionResultDrmBuffer->flush();
 
-  return HWC2::Error::None;
+  HWC2::Error error =
+      displayInfo.compositionResultDrmBuffer->flush(outRetireFence);
+  if (error != HWC2::Error::None) {
+    ALOGE("%s: display:%" PRIu64 " failed to flush drm buffer" PRIu64,
+          __FUNCTION__, displayId);
+  }
+  return error;
 }
 
 bool GuestComposer::canComposeLayer(Layer* layer) {
@@ -786,7 +817,7 @@ bool GuestComposer::canComposeLayer(Layer* layer) {
   return true;
 }
 
-HWC2::Error GuestComposer::composerLayerInto(
+HWC2::Error GuestComposer::composeLayerInto(
     Layer* srcLayer, std::uint8_t* dstBuffer, std::uint32_t dstBufferWidth,
     std::uint32_t dstBufferHeight, std::uint32_t dstBufferStrideBytes,
     std::uint32_t dstBufferBytesPerPixel) {
