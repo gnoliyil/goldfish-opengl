@@ -533,13 +533,20 @@ typedef struct VkMemoryGetZirconHandleInfoFUCHSIA {
 
 #define VK_STRUCTURE_TYPE_BUFFER_COLLECTION_BUFFER_CREATE_INFO_FUCHSIA \
     ((VkStructureType)1001004008)
+
+// Deprecated
 #define VK_STRUCTURE_TYPE_TEMP_IMPORT_MEMORY_ZIRCON_HANDLE_INFO_FUCHSIA \
     ((VkStructureType)1001005000)
-#define VK_STRUCTURE_TYPE_TEMP_MEMORY_ZIRCON_HANDLE_PROPERTIES_FUCHSIA \
-    ((VkStructureType)1001005001)
 #define VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA \
     ((VkExternalMemoryHandleTypeFlagBits)0x00100000)
 #endif  // VK_FUCHSIA_external_memory
+
+
+// To be moved inside the ifdef above once spec is updated
+#define VK_STRUCTURE_TYPE_IMPORT_MEMORY_ZIRCON_HANDLE_INFO_FUCHSIA \
+    ((VkStructureType)1000364000)
+#define VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA \
+    ((VkExternalMemoryHandleTypeFlagBits)0x00000800)
 
 #ifndef VK_FUCHSIA_external_semaphore
 #define VK_FUCHSIA_external_semaphore 1
@@ -565,6 +572,10 @@ typedef struct VkSemaphoreGetZirconHandleInfoFUCHSIA {
 #define VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TEMP_ZIRCON_EVENT_BIT_FUCHSIA \
     ((VkExternalSemaphoreHandleTypeFlagBits)0x00100000)
 #endif  // VK_FUCHSIA_external_semaphore
+
+// To be moved inside the ifdef above once spec is updated
+#define VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_ZIRCON_EVENT_BIT_FUCHSIA \
+    ((VkExternalMemoryHandleTypeFlagBits)0x00000080)
 
 // VulkanStream features
 #define VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT (1 << 0)
