@@ -54,6 +54,7 @@ class Display {
   Layer* getLayer(hwc2_layer_t layerHandle);
 
   FencedBuffer& getClientTarget() { return mClientTarget; }
+  buffer_handle_t waitAndGetClientTargetBuffer();
 
   const std::vector<Layer*>& getOrderedLayers() { return mOrderedLayers; }
 
@@ -203,7 +204,7 @@ class Display {
   HWC2::PowerMode mPowerMode = HWC2::PowerMode::Off;
   HWC2::Vsync mVsyncEnabled = HWC2::Vsync::Invalid;
   uint32_t mVsyncPeriod;
-  VsyncThread mVsyncThread;
+  sp<VsyncThread> mVsyncThread;
   FencedBuffer mClientTarget;
   // Will only be non-null after the Display has been validated and
   // before it has been presented
