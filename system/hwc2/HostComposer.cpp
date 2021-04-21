@@ -36,7 +36,7 @@ namespace android {
 namespace {
 
 static int getVsyncHzFromProperty() {
-  static constexpr const auto kVsyncProp = "ro.kernel.qemu.vsync";
+  static constexpr const auto kVsyncProp = "ro.boot.qemu.vsync";
 
   const auto vsyncProp = android::base::GetProperty(kVsyncProp, "");
   DEBUG_LOG("%s: prop value is: %s", __FUNCTION__, vsyncProp.c_str());
@@ -172,17 +172,15 @@ void FreeDisplayColorBuffer(const native_handle_t* h) {
 
 }  // namespace
 
-HWC2::Error HostComposer::init() {
+HWC2::Error HostComposer::init(const HotplugCallback& cb) {
   mIsMinigbm = isMinigbmFromProperty();
-  if (!mIsMinigbm) {
+  if (mIsMinigbm) {
+    if (!mDrmPresenter.init(cb)) {
+      ALOGE("%s: failed to initialize DrmPresenter", __FUNCTION__);
+      return HWC2::Error::NoResources;
+    }
+  } else {
     mSyncDeviceFd = goldfish_sync_open();
-  }
-
-  if (!mDrmPresenter.init()) {
-    ALOGE("%s: failed to initialize DrmPresenter", __FUNCTION__);
-
-    // Non-fatal for HostComposer.
-    // return HWC2::Error::NoResources;
   }
 
   return HWC2::Error::None;
@@ -221,7 +219,7 @@ HWC2::Error HostComposer::createPrimaryDisplay(
 
   int refreshRateHz = getVsyncHzFromProperty();
 
-  auto display = std::make_unique<Display>(*device, this);
+  auto display = std::make_unique<Display>(*device, this, 0);
   if (display == nullptr) {
     ALOGE("%s failed to allocate display", __FUNCTION__);
     return HWC2::Error::NoResources;
@@ -246,6 +244,80 @@ HWC2::Error HostComposer::createPrimaryDisplay(
   if (error != HWC2::Error::None) {
     ALOGE("%s failed to add display:%" PRIu64, __FUNCTION__, displayId);
     return error;
+  }
+
+  return HWC2::Error::None;
+}
+
+HWC2::Error HostComposer::createDisplay(
+    Device* device, uint32_t displayId, uint32_t width, uint32_t height,
+    uint32_t dpiX, uint32_t dpiY, uint32_t refreshRateHz,
+    const AddDisplayToDeviceFunction& addDisplayToDeviceFn) {
+  HWC2::Error error;
+  Display* display = device->getDisplay(displayId);
+  if (display) {
+    ALOGD("%s display %d already existed, then update", __func__, displayId);
+  }
+
+  DEFINE_AND_VALIDATE_HOST_CONNECTION
+  hostCon->lock();
+  if (rcEnc->rcCreateDisplayById(rcEnc, displayId)) {
+    ALOGE("%s host failed to create display %" PRIu32, __func__, displayId);
+    hostCon->unlock();
+    return HWC2::Error::NoResources;
+  }
+  if (rcEnc->rcSetDisplayPose(rcEnc, displayId, -1, -1, width, height)) {
+    ALOGE("%s host failed to set display %" PRIu32, __func__, displayId);
+    hostCon->unlock();
+    return HWC2::Error::NoResources;
+  }
+  hostCon->unlock();
+
+  if (!display) {
+    auto newDisplay = std::make_unique<Display>(*device, this, displayId);
+    if (newDisplay == nullptr) {
+      ALOGE("%s failed to allocate display", __FUNCTION__);
+      return HWC2::Error::NoResources;
+    }
+
+    error = newDisplay->init(width, height, dpiX, dpiY, refreshRateHz);
+    if (error != HWC2::Error::None) {
+      ALOGE("%s failed to initialize display:%" PRIu32, __FUNCTION__,
+            displayId);
+      return error;
+    }
+
+    error =
+        createHostComposerDisplayInfo(newDisplay.get(), displayId);
+    if (error != HWC2::Error::None) {
+      ALOGE("%s failed to initialize host info for display:%" PRIu32,
+            __FUNCTION__, displayId);
+      return error;
+    }
+
+    error = addDisplayToDeviceFn(std::move(newDisplay));
+    if (error != HWC2::Error::None) {
+      ALOGE("%s failed to add display:%" PRIu32, __FUNCTION__, displayId);
+      return error;
+    }
+  } else {
+    display->lock();
+    // update display parameters
+    error = display->updateParameters(width, height, dpiX, dpiY, refreshRateHz);
+    if (error != HWC2::Error::None) {
+      ALOGE("%s failed to update display:%" PRIu32, __FUNCTION__, displayId);
+      display->unlock();
+      return error;
+    }
+
+    error = createHostComposerDisplayInfo(display, displayId);
+    if (error != HWC2::Error::None) {
+      ALOGE("%s failed to initialize host info for display:%" PRIu32,
+            __FUNCTION__, displayId);
+      display->unlock();
+      return error;
+    }
+    display->unlock();
   }
 
   return HWC2::Error::None;
@@ -286,7 +358,7 @@ HWC2::Error HostComposer::createSecondaryDisplays(
 
   static constexpr const uint32_t kHostDisplayIdStart = 6;
 
-  uint32_t secondaryDisplayIndex = 0;
+  uint32_t secondaryDisplayIndex = 1;
   while (!propIntParts.empty()) {
     int width = propIntParts[1];
     int height = propIntParts[2];
@@ -297,7 +369,7 @@ HWC2::Error HostComposer::createSecondaryDisplays(
     propIntParts.erase(propIntParts.begin(), propIntParts.begin() + 5);
 
     uint32_t expectedHostDisplayId =
-        kHostDisplayIdStart + secondaryDisplayIndex;
+        kHostDisplayIdStart + secondaryDisplayIndex - 1;
     uint32_t actualHostDisplayId = 0;
 
     DEFINE_AND_VALIDATE_HOST_CONNECTION
@@ -314,7 +386,8 @@ HWC2::Error HostComposer::createSecondaryDisplays(
           expectedHostDisplayId, actualHostDisplayId);
     }
 
-    auto display = std::make_unique<Display>(*device, this);
+    auto display =
+        std::make_unique<Display>(*device, this, secondaryDisplayIndex++);
     if (display == nullptr) {
       ALOGE("%s failed to allocate display", __FUNCTION__);
       return HWC2::Error::NoResources;
@@ -423,6 +496,13 @@ HWC2::Error HostComposer::onDisplayDestroy(Display* display) {
 
   HostComposerDisplayInfo& displayInfo = mDisplayInfos[displayId];
 
+  if (displayId != 0) {
+    DEFINE_AND_VALIDATE_HOST_CONNECTION
+    hostCon->lock();
+    rcEnc->rcDestroyDisplay(rcEnc, displayInfo.hostDisplayId);
+    hostCon->unlock();
+  }
+
   FreeDisplayColorBuffer(displayInfo.compositionResultBuffer);
 
   mDisplayInfos.erase(it);
@@ -466,6 +546,8 @@ HWC2::Error HostComposer::validateDisplay(
   if (hostCompositionV1 || hostCompositionV2) {
     // Support Device and SolidColor, otherwise, fallback all layers to Client.
     bool fallBack = false;
+    // TODO: use local var compositiontype, avoid call getCompositionType() many
+    // times
     for (auto& layer : layers) {
       if (layer->getCompositionType() == HWC2::Composition::Invalid) {
         // Log error for unused layers, layer leak?
@@ -554,7 +636,8 @@ HWC2::Error HostComposer::presentDisplay(Display* display,
       if (displayClientTarget.getBuffer() != nullptr) {
         if (mIsMinigbm) {
           int retireFence;
-          displayInfo.clientTargetDrmBuffer->flush(&retireFence);
+          displayInfo.clientTargetDrmBuffer->flushToDisplay(display->getId(),
+                                                            &retireFence);
           *outRetireFence = dup(retireFence);
           close(retireFence);
         } else {
@@ -589,6 +672,7 @@ HWC2::Error HostComposer::presentDisplay(Display* display,
 
     int releaseLayersCount = 0;
     for (auto layer : layers) {
+      // TODO: use local var composisitonType to store getCompositionType()
       if (layer->getCompositionType() != HWC2::Composition::Device &&
           layer->getCompositionType() != HWC2::Composition::SolidColor) {
         ALOGE("%s: Unsupported composition types %d layer %u", __FUNCTION__,
@@ -714,7 +798,8 @@ HWC2::Error HostComposer::presentDisplay(Display* display,
     hostCon->unlock();
 
     if (mIsMinigbm) {
-      displayInfo.compositionResultDrmBuffer->flush(&retire_fd);
+      displayInfo.compositionResultDrmBuffer->flushToDisplay(display->getId(),
+                                                             &retire_fd);
     } else {
       goldfish_sync_queue_work(mSyncDeviceFd, sync_handle, thread_handle,
                                &retire_fd);
@@ -738,7 +823,8 @@ HWC2::Error HostComposer::presentDisplay(Display* display,
     // we set all layers Composition::Client, so do nothing.
     if (mIsMinigbm) {
       int retireFence;
-      displayInfo.clientTargetDrmBuffer->flush(&retireFence);
+      displayInfo.clientTargetDrmBuffer->flushToDisplay(display->getId(),
+                                                        &retireFence);
       *outRetireFence = dup(retireFence);
       close(retireFence);
     } else {

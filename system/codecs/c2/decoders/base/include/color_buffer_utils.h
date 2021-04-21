@@ -13,30 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <cutils/native_handle.h>
 
-#ifndef ANDROID_HWC_COMMON_H
-#define ANDROID_HWC_COMMON_H
-
-#undef LOG_TAG
-#define LOG_TAG "RanchuHwc"
-
-#include <android-base/logging.h>
-#include <inttypes.h>
-#include <log/log.h>
-
-// Uncomment to enable additional debug logging.
-//#define DEBUG_RANCHU_HWC
-
-#if defined(DEBUG_RANCHU_HWC)
-#define DEBUG_LOG ALOGE
-#else
-#define DEBUG_LOG(...) ((void)0)
-#endif
-
-#define HWC2_INCLUDE_STRINGIFICATION
-#define HWC2_USE_CPP11
-#include <hardware/hwcomposer2.h>
-#undef HWC2_INCLUDE_STRINGIFICATION
-#undef HWC2_USE_CPP11
-
-#endif
+uint32_t getColorBufferHandle(native_handle_t const* handle);
