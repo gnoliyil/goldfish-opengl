@@ -41,7 +41,7 @@ static GLubyte *gVersionString= (GLubyte *) "OpenGL ES 3.0";
 static GLubyte *gExtensionsString= (GLubyte *) "GL_OES_EGL_image_external ";
 
 #define SET_ERROR_IF(condition, err) if((condition)) { \
-        ALOGE("%s:%s:%d GL error 0x%x\n", __FILE__, __FUNCTION__, __LINE__, err); \
+        ALOGE("%s:%s:%d GL error 0x%x condition [%s]\n", __FILE__, __FUNCTION__, __LINE__, err, #condition); \
         ctx->setError(err); \
         return; \
     }
@@ -74,6 +74,7 @@ GL2Encoder::GL2Encoder(IOStream *stream, ChecksumCalculator *protocol)
     m_currMajorVersion = 2;
     m_currMinorVersion = 0;
     m_hasAsyncUnmapBuffer = false;
+    m_hasSyncBufferData = false;
     m_initialized = false;
     m_noHostError = false;
     m_state = NULL;
@@ -668,7 +669,11 @@ void GL2Encoder::s_glBufferData(void * self, GLenum target, GLsizeiptr size, con
 
     ctx->m_shared->updateBufferData(bufferId, size, data);
     ctx->m_shared->setBufferUsage(bufferId, usage);
-    ctx->m_glBufferData_enc(self, target, size, data, usage);
+    if (ctx->m_hasSyncBufferData) {
+        ctx->glBufferDataSyncAEMU(self, target, size, data, usage);
+    } else {
+        ctx->m_glBufferData_enc(self, target, size, data, usage);
+    }
 }
 
 void GL2Encoder::s_glBufferSubData(void * self, GLenum target, GLintptr offset, GLsizeiptr size, const GLvoid * data)
@@ -2847,8 +2852,8 @@ void GL2Encoder::restore2DTextureTarget(GLenum target)
     }
 }
 
-void GL2Encoder::associateEGLImage(GLenum target, GLeglImageOES eglImage) {
-    m_state->setBoundEGLImage(target, eglImage);
+void GL2Encoder::associateEGLImage(GLenum target, GLeglImageOES eglImage, int width, int height) {
+    m_state->setBoundEGLImage(target, eglImage, width, height);
 }
 
 
@@ -6106,6 +6111,18 @@ void GL2Encoder::s_glCopyTexSubImage2D(void *self , GLenum target, GLint level, 
     GLuint tex = ctx->m_state->getBoundTexture(target);
     GLsizei neededWidth = xoffset + width;
     GLsizei neededHeight = yoffset + height;
+    ALOGD("%s: tex %u needed width height %d %d xoff %d width %d yoff %d height %d (texture width %d height %d) level %d\n", __func__,
+            tex,
+            neededWidth,
+            neededHeight,
+            xoffset,
+            width,
+            yoffset,
+            height,
+            ctx->m_state->queryTexWidth(level, tex),
+            ctx->m_state->queryTexWidth(level, tex),
+            level);
+
     SET_ERROR_IF(tex &&
                  (neededWidth > ctx->m_state->queryTexWidth(level, tex) ||
                   neededHeight > ctx->m_state->queryTexHeight(level, tex)),
