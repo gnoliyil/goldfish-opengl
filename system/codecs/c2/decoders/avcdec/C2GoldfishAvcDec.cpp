@@ -407,9 +407,17 @@ c2_status_t C2GoldfishAvcDec::onStop() {
 void C2GoldfishAvcDec::onReset() { (void)onStop(); }
 
 void C2GoldfishAvcDec::onRelease() {
-    (void)deleteDecoder();
+    deleteContext();
     if (mOutBlock) {
         mOutBlock.reset();
+    }
+}
+
+void C2GoldfishAvcDec::decodeHeaderAfterFlush() {
+    if (mContext && !mCsd0.empty() && !mCsd1.empty()) {
+        mContext->decodeFrame(&(mCsd0[0]), mCsd0.size(), 0);
+        mContext->decodeFrame(&(mCsd1[0]), mCsd1.size(), 0);
+        DDD("resending csd0 and csd1");
     }
 }
 
@@ -430,7 +438,6 @@ c2_status_t C2GoldfishAvcDec::onFlush_sm() {
         return C2_NO_MEMORY;
     }
 
-    mContext->flush();
     while (true) {
         mPts = 0;
         setDecodeArgs(nullptr, nullptr, 0, 0, 0);
@@ -446,6 +453,7 @@ c2_status_t C2GoldfishAvcDec::onFlush_sm() {
         mOutBufferFlush = nullptr;
     }
 
+    deleteContext();
     return C2_OK;
 }
 
@@ -516,6 +524,7 @@ status_t C2GoldfishAvcDec::setFlushMode() {
     if (mContext) {
         mContext->flush();
     }
+    mHeaderDecoded = false;
     return OK;
 }
 
@@ -523,13 +532,7 @@ status_t C2GoldfishAvcDec::resetDecoder() {
     mStride = 0;
     mSignalledError = false;
     mHeaderDecoded = false;
-    if (mContext) {
-        // The resolution may have changed, so our safest bet is to just destroy
-        // the current context and recreate another one, with the new width and
-        // height.
-        mContext->destroyH264Context();
-        mContext.reset(nullptr);
-    }
+    deleteContext();
 
     return OK;
 }
@@ -540,12 +543,11 @@ void C2GoldfishAvcDec::resetPlugin() {
     gettimeofday(&mTimeEnd, nullptr);
 }
 
-status_t C2GoldfishAvcDec::deleteDecoder() {
+void C2GoldfishAvcDec::deleteContext() {
     if (mContext) {
         mContext->destroyH264Context();
         mContext.reset(nullptr);
     }
-    return OK;
 }
 
 static void fillEmptyWork(const std::unique_ptr<C2Work> &work) {
@@ -791,6 +793,7 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
         DDD("creating decoder context to host in process work");
         checkMode(pool);
         createDecoder();
+        decodeHeaderAfterFlush();
     }
 
     size_t inOffset = 0u;
@@ -843,6 +846,17 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
                 setParams(mStride);
             }
 
+            DDD("flag is %x", work->input.flags);
+            if (work->input.flags & C2FrameData::FLAG_CODEC_CONFIG) {
+                if (mCsd0.empty()) {
+                    mCsd0.assign(mInPBuffer, mInPBuffer + mInPBufferSize);
+                    DDD("assign to csd0 with %d bytpes", mInPBufferSize);
+                } else if (mCsd1.empty()) {
+                    mCsd1.assign(mInPBuffer, mInPBuffer + mInPBufferSize);
+                    DDD("assign to csd1 with %d bytpes", mInPBufferSize);
+                }
+            }
+
             uint32_t delay;
             GETTIME(&mTimeStart, nullptr);
             TIME_DIFF(mTimeEnd, mTimeStart, delay);
@@ -878,6 +892,7 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
         if (mImg.data != nullptr) {
             DDD("got data %" PRIu64,  mPts2Index[mImg.pts]);
             hasPicture = true;
+            mHeaderDecoded = true;
             copyImageData(mByteBuffer, mImg);
             finishWork(mPts2Index[mImg.pts], work);
             removePts(mImg.pts);
@@ -954,6 +969,7 @@ C2GoldfishAvcDec::drainInternal(uint32_t drainMode,
         }
     }
 
+    deleteContext();
     return C2_OK;
 }
 

@@ -73,7 +73,7 @@ class C2GoldfishAvcDec : public SimpleC2Component {
                               const std::unique_ptr<C2Work> &work);
     status_t resetDecoder();
     void resetPlugin();
-    status_t deleteDecoder();
+    void deleteContext();
 
     std::shared_ptr<IntfImpl> mIntf;
 
@@ -140,6 +140,10 @@ class C2GoldfishAvcDec : public SimpleC2Component {
 #ifdef FILE_DUMP_ENABLE
     char mInFile[200];
 #endif /* FILE_DUMP_ENABLE */
+
+    std::vector<uint8_t> mCsd0;
+    std::vector<uint8_t> mCsd1;
+    void decodeHeaderAfterFlush();
 
     C2_DO_NOT_COPY(C2GoldfishAvcDec);
 };
