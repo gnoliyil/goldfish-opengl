@@ -1109,10 +1109,14 @@ void GL2Encoder::s_glGetBooleanv(void *self, GLenum param, GLboolean *ptr)
 
     default:
         if (!state) return;
-        if (!state->getClientStateParameter<GLboolean>(param, ptr)) {
-            ctx->safe_glGetBooleanv(param, ptr);
+        {
+            GLint intVal;
+            if (!state->getClientStateParameter<GLint>(param, &intVal)) {
+                ctx->safe_glGetBooleanv(param, ptr);
+            } else {
+                *ptr = (intVal != 0) ? GL_TRUE : GL_FALSE;
+            }
         }
-        *ptr = (*ptr != 0) ? GL_TRUE : GL_FALSE;
         break;
     }
 }
@@ -6111,7 +6115,7 @@ void GL2Encoder::s_glCopyTexSubImage2D(void *self , GLenum target, GLint level, 
     GLuint tex = ctx->m_state->getBoundTexture(target);
     GLsizei neededWidth = xoffset + width;
     GLsizei neededHeight = yoffset + height;
-    ALOGD("%s: tex %u needed width height %d %d xoff %d width %d yoff %d height %d (texture width %d height %d) level %d\n", __func__,
+    ALOGV("%s: tex %u needed width height %d %d xoff %d width %d yoff %d height %d (texture width %d height %d) level %d\n", __func__,
             tex,
             neededWidth,
             neededHeight,
