@@ -1673,6 +1673,7 @@ GLint * GL2Encoder::getCompressedTextureFormats()
 // Replace uses of samplerExternalOES with sampler2D, recording the names of
 // modified shaders in data. Also remove
 //   #extension GL_OES_EGL_image_external : require
+//   #extension GL_OES_EGL_image_external_essl3 : require
 // statements.
 //
 // This implementation assumes the input has already been pre-processed. If not,
@@ -1762,34 +1763,40 @@ static bool replaceExternalSamplerUniformDefinition(char* str, const std::string
         }
         char* sampler_start = c;
         c += samplerExternalType.size();
-        if (!isspace(*c) && *c != '\0') {
+        if (!isspace(*c) && *c != '\0' && *c != ';') {
             continue;
+        } else {
+            // capture sampler name
+            while (isspace(*c) && *c != '\0') {
+                c++;
+            }
         }
 
-        // capture sampler name
-        while (isspace(*c) && *c != '\0') {
-            c++;
-        }
-        if (!isalpha(*c) && *c != '_') {
-            // not an identifier
-            return false;
-        }
-        char* name_start = c;
-        do {
-            c++;
-        } while (isalnum(*c) || *c == '_');
+        if ((!isalpha(*c) && *c != '_') || *c == ';') {
+            // not an identifier, but might have some effect anyway.
+            if (samplerExternalType == STR_SAMPLER_EXTERNAL_OES) {
+                memcpy(sampler_start, STR_SAMPLER2D_SPACE, sizeof(STR_SAMPLER2D_SPACE)-1);
+            }
+        } else {
+            char* name_start = c;
+            do {
+                c++;
+            } while (isalnum(*c) || *c == '_');
 
-        size_t len = (size_t)(c - name_start);
-        data->samplerExternalNames.push_back(
-            std::string(name_start, len));
+            size_t len = (size_t)(c - name_start);
+            if (len) {
+                data->samplerExternalNames.push_back(
+                        std::string(name_start, len));
+            }
 
-        // We only need to perform a string replacement for the original
-        // occurrence of samplerExternalOES if a #define was used.
-        //
-        // The important part was to record the name in
-        // |data->samplerExternalNames|.
-        if (samplerExternalType == STR_SAMPLER_EXTERNAL_OES) {
-            memcpy(sampler_start, STR_SAMPLER2D_SPACE, sizeof(STR_SAMPLER2D_SPACE)-1);
+            // We only need to perform a string replacement for the original
+            // occurrence of samplerExternalOES if a #define was used.
+            //
+            // The important part was to record the name in
+            // |data->samplerExternalNames|.
+            if (samplerExternalType == STR_SAMPLER_EXTERNAL_OES) {
+                memcpy(sampler_start, STR_SAMPLER2D_SPACE, sizeof(STR_SAMPLER2D_SPACE)-1);
+            }
         }
     }
 
@@ -2602,7 +2609,8 @@ void GL2Encoder::s_glTexImage2D(void* self, GLenum target, GLint level,
     SET_ERROR_IF(!GLESv2Validation::textureTarget(ctx, target), GL_INVALID_ENUM);
     SET_ERROR_IF(!GLESv2Validation::pixelType(ctx, type), GL_INVALID_ENUM);
     SET_ERROR_IF(!GLESv2Validation::pixelFormat(ctx, format), GL_INVALID_ENUM);
-    SET_ERROR_IF(!GLESv2Validation::pixelFormat(ctx, internalformat) && !GLESv2Validation::pixelInternalFormat(internalformat), GL_INVALID_ENUM);
+    SET_ERROR_IF(!GLESv2Validation::pixelFormat(ctx, internalformat) && !GLESv2Validation::pixelInternalFormat(internalformat), GL_INVALID_VALUE);
+    SET_ERROR_IF(!(GLESv2Validation::pixelOp(format,type)),GL_INVALID_OPERATION);
     SET_ERROR_IF(!GLESv2Validation::pixelSizedFormat(ctx, internalformat, format, type), GL_INVALID_OPERATION);
     // If unpack buffer is nonzero, verify unmapped state.
     SET_ERROR_IF(ctx->isBufferTargetMapped(GL_PIXEL_UNPACK_BUFFER), GL_INVALID_OPERATION);
@@ -2753,7 +2761,7 @@ void GL2Encoder::s_glCopyTexImage2D(void* self, GLenum target, GLint level,
     GLClientState* state = ctx->m_state;
 
     SET_ERROR_IF(!GLESv2Validation::textureTarget(ctx, target), GL_INVALID_ENUM);
-    SET_ERROR_IF(!GLESv2Validation::pixelFormat(ctx, internalformat) && !GLESv2Validation::pixelInternalFormat(internalformat), GL_INVALID_ENUM);
+    SET_ERROR_IF(!GLESv2Validation::pixelFormat(ctx, internalformat) && !GLESv2Validation::pixelInternalFormat(internalformat), GL_INVALID_VALUE);
     GLint max_texture_size;
     GLint max_cube_map_texture_size;
     ctx->glGetIntegerv(ctx, GL_MAX_TEXTURE_SIZE, &max_texture_size);
@@ -2939,6 +2947,7 @@ void GL2Encoder::s_glRenderbufferStorage(void* self,
     GLClientState* state = ctx->m_state;
 
     SET_ERROR_IF(target != GL_RENDERBUFFER, GL_INVALID_ENUM);
+    SET_ERROR_IF(0 == ctx->m_state->boundRenderbuffer(), GL_INVALID_OPERATION);
     SET_ERROR_IF(
         !GLESv2Validation::rboFormat(ctx, internalformat),
         GL_INVALID_ENUM);
@@ -3365,6 +3374,7 @@ void GL2Encoder::s_glCompressedTexImage2D(void* self, GLenum target, GLint level
 
     SET_ERROR_IF(!GLESv2Validation::textureTarget(ctx, target), GL_INVALID_ENUM);
     SET_ERROR_IF(target == GL_TEXTURE_CUBE_MAP, GL_INVALID_ENUM);
+    fprintf(stderr, "%s: format: 0x%x\n", __func__, internalformat);
     // Filter compressed formats support.
     SET_ERROR_IF(!GLESv2Validation::supportedCompressedFormat(ctx, internalformat), GL_INVALID_ENUM);
     // Verify level <= log2(GL_MAX_TEXTURE_SIZE).
@@ -4237,6 +4247,7 @@ void GL2Encoder::s_glTexImage3D(void* self, GLenum target, GLint level, GLint in
                  GL_INVALID_ENUM);
     SET_ERROR_IF(!GLESv2Validation::pixelType(ctx, type), GL_INVALID_ENUM);
     SET_ERROR_IF(!GLESv2Validation::pixelFormat(ctx, format), GL_INVALID_ENUM);
+    SET_ERROR_IF(!(GLESv2Validation::pixelOp(format,type)),GL_INVALID_OPERATION);
     SET_ERROR_IF(!GLESv2Validation::pixelSizedFormat(ctx, internalFormat, format, type), GL_INVALID_OPERATION);
     SET_ERROR_IF(target == GL_TEXTURE_3D &&
         ((format == GL_DEPTH_COMPONENT) ||
@@ -6575,6 +6586,7 @@ void GL2Encoder::s_glGetRenderbufferParameteriv(void *self , GLenum target, GLen
     GL2Encoder* ctx = (GL2Encoder*)self;
     SET_ERROR_IF(target != GL_RENDERBUFFER, GL_INVALID_ENUM);
     SET_ERROR_IF(!GLESv2Validation::allowedGetRenderbufferParameter(pname), GL_INVALID_ENUM);
+    SET_ERROR_IF(0 == ctx->m_state->boundRenderbuffer(), GL_INVALID_OPERATION);
     ctx->m_glGetRenderbufferParameteriv_enc(ctx, target, pname, params);
 }
 
