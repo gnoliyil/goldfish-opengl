@@ -342,6 +342,16 @@ private:  // **** impl ****
             break;
 
         default:
+            if (static_cast<android::hardware::graphics::common::V1_1::PixelFormat>(cb->format) ==
+                    android::hardware::graphics::common::V1_1::PixelFormat::YCBCR_P010) {
+                yStride = cb->width * 2;
+                cStride = yStride;
+                uOffset = cb->height * yStride;
+                vOffset = uOffset + 2;
+                cStep = 4;
+                break;
+            }
+
             ALOGE("%s:%d unexpected format (%d)", __func__, __LINE__, cb->format);
             RETURN_ERROR(Error3::BAD_BUFFER);
         }
@@ -383,7 +393,8 @@ private:  // **** impl ****
 
         // camera delivers bits to the buffer directly and does not require
         // an explicit read.
-        if (usageSwRead && !usageHwCamera) {
+        const bool cbReadable = cb.usage & BufferUsage::CPU_READ_MASK;
+        if (usageSwRead && !usageHwCamera && cbReadable) {
             if (gralloc_is_yuv_format(cb.format)) {
                 if (rcEnc->hasYUVCache()) {
                     uint32_t bufferSize;
