@@ -129,6 +129,7 @@ VkResult getMemoryAndroidHardwareBufferANDROID(struct AHardwareBuffer **) { retu
 #include "goldfish_address_space.h"
 #include "goldfish_vk_private_defs.h"
 #include "vk_format_info.h"
+#include "vk_struct_id.h"
 #include "vk_util.h"
 
 #include <set>
@@ -1594,8 +1595,13 @@ public:
         void*,
         VkPhysicalDevice,
         VkPhysicalDeviceProperties* pProperties) {
+        // We have host properties at this point
         if (pProperties) {
-            pProperties->deviceType = VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
+            // We need this to ignore some cts tests when using Swiftshader Vk
+            if (pProperties->deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+                // Otherwise, if not CPU type, mark as virtual type
+                pProperties->deviceType = VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
+            }
         }
     }
 
@@ -1604,16 +1610,17 @@ public:
         VkPhysicalDevice,
         VkPhysicalDeviceProperties2* pProperties) {
         if (pProperties) {
-            pProperties->properties.deviceType =
-                VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
+            // We need this to ignore some cts tests when using Swiftshader Vk
+            if (pProperties->properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+                // Otherwise, if not CPU type, mark as virtual type
+                pProperties->properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
+            }
 
-            VkPhysicalDeviceDeviceMemoryReportFeaturesEXT *memoryReportFeaturesEXT
-                = new VkPhysicalDeviceDeviceMemoryReportFeaturesEXT();
-            memoryReportFeaturesEXT->sType
-                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT;
-            memoryReportFeaturesEXT->pNext = pProperties->pNext;
-            memoryReportFeaturesEXT->deviceMemoryReport = VK_TRUE;
-            pProperties->pNext = memoryReportFeaturesEXT;
+            VkPhysicalDeviceDeviceMemoryReportFeaturesEXT* memoryReportFeaturesEXT =
+                vk_find_struct<VkPhysicalDeviceDeviceMemoryReportFeaturesEXT>(pProperties);
+            if (memoryReportFeaturesEXT) {
+                memoryReportFeaturesEXT->deviceMemoryReport = VK_TRUE;
+            }
         }
     }
 
