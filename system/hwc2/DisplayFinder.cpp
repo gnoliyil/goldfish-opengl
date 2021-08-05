@@ -129,7 +129,7 @@ HWC2::Error findGoldfishSecondaryDisplayConfigs(
     propIntParts.push_back(propIntPart);
   }
 
-  int secondaryDisplayId = 0;
+  int secondaryDisplayId = 1;
   while (!propIntParts.empty()) {
     configs->push_back(DisplayConfig{
         .id = secondaryDisplayId,

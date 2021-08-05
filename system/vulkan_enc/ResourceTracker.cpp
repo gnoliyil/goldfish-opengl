@@ -3582,13 +3582,13 @@ public:
                                 abort();
                         }
 
-                        fidl::FidlAllocator allocator;
+                        fidl::Arena arena;
                         fuchsia_hardware_goldfish::wire::CreateColorBuffer2Params createParams(
-                            allocator);
-                        createParams.set_width(allocator, pImageCreateInfo->extent.width)
-                            .set_height(allocator, pImageCreateInfo->extent.height)
-                            .set_format(allocator, format)
-                            .set_memory_property(allocator,
+                            arena);
+                        createParams.set_width(arena, pImageCreateInfo->extent.width)
+                            .set_height(arena, pImageCreateInfo->extent.height)
+                            .set_format(arena, format)
+                            .set_memory_property(arena,
                                 fuchsia_hardware_goldfish::wire::kMemoryPropertyDeviceLocal);
 
                         auto result = mControlDevice->CreateColorBuffer2(
@@ -3610,11 +3610,11 @@ public:
                 }
 
                 if (pBufferConstraintsInfo) {
-                    fidl::FidlAllocator allocator;
-                    fuchsia_hardware_goldfish::wire::CreateBuffer2Params createParams(allocator);
-                    createParams.set_size(allocator,
+                    fidl::Arena arena;
+                    fuchsia_hardware_goldfish::wire::CreateBuffer2Params createParams(arena);
+                    createParams.set_size(arena,
                             pBufferConstraintsInfo->pBufferCreateInfo->size)
-                        .set_memory_property(allocator,
+                        .set_memory_property(arena,
                             fuchsia_hardware_goldfish::wire::kMemoryPropertyDeviceLocal);
 
                     auto result =
@@ -4167,15 +4167,15 @@ public:
                             ? fuchsia_hardware_goldfish::wire::kMemoryPropertyDeviceLocal
                             : fuchsia_hardware_goldfish::wire::kMemoryPropertyHostVisible;
 
-                    fidl::FidlAllocator allocator;
+                    fidl::Arena arena;
                     fuchsia_hardware_goldfish::wire::CreateColorBuffer2Params createParams(
-                        allocator);
-                    createParams.set_width(allocator,
+                        arena);
+                    createParams.set_width(arena,
                             info.settings.image_format_constraints.min_coded_width)
-                        .set_height(allocator,
+                        .set_height(arena,
                             info.settings.image_format_constraints.min_coded_height)
-                        .set_format(allocator, format)
-                        .set_memory_property(allocator, memory_property);
+                        .set_format(arena, format)
+                        .set_memory_property(arena, memory_property);
 
                     auto result =
                         mControlDevice->CreateColorBuffer2(std::move(vmo), std::move(createParams));
@@ -5202,10 +5202,10 @@ public:
             }
 
             if (vmo && vmo->is_valid()) {
-                fidl::FidlAllocator allocator;
-                fuchsia_hardware_goldfish::wire::CreateBuffer2Params createParams(allocator);
-                createParams.set_size(allocator, pCreateInfo->size)
-                    .set_memory_property(allocator,
+                fidl::Arena arena;
+                fuchsia_hardware_goldfish::wire::CreateBuffer2Params createParams(arena);
+                createParams.set_size(arena, pCreateInfo->size)
+                    .set_memory_property(arena,
                         fuchsia_hardware_goldfish::wire::kMemoryPropertyDeviceLocal);
 
                 auto result =
@@ -6891,11 +6891,12 @@ public:
     }
 
     int exportSyncFdForQSRI(VkImage image) {
+        int fd = -1;
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
         ALOGV("%s: call for image %p hos timage handle 0x%llx\n", __func__, (void*)image,
                 (unsigned long long)get_host_u64_VkImage(image));
-        int fd;
         if (mFeatureInfo->hasVirtioGpuNativeSync) {
-#if !defined(HOST_BUILD) && defined(VK_USE_PLATFORM_ANDROID_KHR)
+#ifndef HOST_BUILD
             uint64_t hostImageHandle = get_host_u64_VkImage(image);
             uint32_t hostImageHandleLo = (uint32_t)hostImageHandle;
             uint32_t hostImageHandleHi = (uint32_t)(hostImageHandle >> 32);
@@ -6927,7 +6928,7 @@ public:
             }
 
             fd = execbuffer.fence_fd;
-#endif
+#endif // !defined(HOST_BUILD)
         } else {
             goldfish_sync_queue_work(
                     mSyncDeviceFd,
@@ -6936,6 +6937,7 @@ public:
                     &fd);
         }
         ALOGV("%s: got fd: %d\n", __func__, fd);
+#endif // VK_USE_PLATFORM_ANDROID_KHR
         return fd;
     }
 
@@ -6950,6 +6952,7 @@ public:
 
         (void)input_result;
 
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
         VkEncoder* enc = (VkEncoder*)context;
 
         if (!mFeatureInfo->hasVulkanAsyncQsri) {
@@ -6975,7 +6978,7 @@ public:
             int syncFd = exportSyncFdForQSRI(image);
             if (syncFd >= 0) close(syncFd);
         }
-
+#endif // VK_USE_PLATFORM_ANDROID_KHR
         return VK_SUCCESS;
     }
 
