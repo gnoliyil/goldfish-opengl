@@ -28,6 +28,7 @@
 
 namespace android {
 
+#define ALIGN16(x) ((((x) + 15) >> 4) << 4)
 #define ALIGN32(x) ((((x) + 31) >> 5) << 5)
 #define MAX_NUM_CORES 4
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -78,7 +79,12 @@ class C2GoldfishAvcDec : public SimpleC2Component {
     std::shared_ptr<IntfImpl> mIntf;
 
     void removePts(uint64_t pts);
+    void insertPts(uint32_t work_index, uint64_t pts);
+    uint64_t getWorkIndex(uint64_t pts);
 
+    // there are same pts matching to different work indices
+    // this happen during csd0/csd1 switching
+    std::map<uint64_t, uint64_t> mOldPts2Index;
     std::map<uint64_t, uint64_t> mPts2Index;
     std::map<uint64_t, uint64_t> mIndex2Pts;
     uint64_t  mPts {0};
@@ -98,9 +104,8 @@ class C2GoldfishAvcDec : public SimpleC2Component {
     int mHostColorBufferId{-1};
 
     void getVuiParams(h264_image_t &img);
-    void copyImageData(uint8_t *pBuffer, h264_image_t &img);
+    void copyImageData(h264_image_t &img);
 
-    uint8_t *mByteBuffer{nullptr};
     h264_image_t mImg{};
     uint32_t mConsumedBytes{0};
     uint8_t *mInPBuffer{nullptr};

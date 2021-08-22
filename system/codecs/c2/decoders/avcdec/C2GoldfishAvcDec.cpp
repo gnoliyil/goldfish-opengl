@@ -477,7 +477,7 @@ status_t C2GoldfishAvcDec::setParams(size_t stride) {
 
 status_t C2GoldfishAvcDec::initDecoder() {
     //    if (OK != createDecoder()) return UNKNOWN_ERROR;
-    mStride = ALIGN32(mWidth);
+    mStride = ALIGN16(mWidth);
     mSignalledError = false;
     resetPlugin();
 
@@ -503,8 +503,7 @@ bool C2GoldfishAvcDec::setDecodeArgs(C2ReadView *inBuffer,
         mInPBuffer = const_cast<uint8_t *>(inBuffer->data() + inOffset);
         mInPBufferSize = inSize;
         mInTsMarker = tsMarker;
-        mIndex2Pts[mInTsMarker] = mPts;
-        mPts2Index[mPts] = mInTsMarker;
+        insertPts(tsMarker, mPts);
     }
 
     // uint32_t displayHeight = mHeight;
@@ -547,6 +546,9 @@ void C2GoldfishAvcDec::deleteContext() {
     if (mContext) {
         mContext->destroyH264Context();
         mContext.reset(nullptr);
+        mPts2Index.clear();
+        mOldPts2Index.clear();
+        mIndex2Pts.clear();
     }
 }
 
@@ -556,6 +558,7 @@ static void fillEmptyWork(const std::unique_ptr<C2Work> &work) {
         flags |= C2FrameData::FLAG_END_OF_STREAM;
         DDD("signalling eos");
     }
+    DDD("fill empty work");
     work->worklets.front()->output.flags = (C2FrameData::flags_t)flags;
     work->worklets.front()->output.buffers.clear();
     work->worklets.front()->output.ordinal = work->input.ordinal;
@@ -632,7 +635,7 @@ void C2GoldfishAvcDec::finishWork(uint64_t index,
 
 c2_status_t
 C2GoldfishAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool> &pool) {
-    if (mOutBlock && (mOutBlock->width() != ALIGN32(mWidth) ||
+    if (mOutBlock && (mOutBlock->width() != ALIGN16(mWidth) ||
                       mOutBlock->height() != mHeight)) {
         mOutBlock.reset();
     }
@@ -644,7 +647,7 @@ C2GoldfishAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool> &pool) {
         // C2MemoryUsage usage = {(unsigned
         // int)(BufferUsage::GPU_DATA_BUFFER)};// { C2MemoryUsage::CPU_READ,
         // C2MemoryUsage::CPU_WRITE };
-        c2_status_t err = pool->fetchGraphicBlock(ALIGN32(mWidth), mHeight,
+        c2_status_t err = pool->fetchGraphicBlock(ALIGN16(mWidth), mHeight,
                                                   format, usage, &mOutBlock);
         if (err != C2_OK) {
             ALOGE("fetchGraphicBlock for Output failed with status %d", err);
@@ -656,17 +659,9 @@ C2GoldfishAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool> &pool) {
                 UnwrapNativeCodec2GrallocHandle(c2Handle);
             mHostColorBufferId = getColorBufferHandle(grallocHandle);
             DDD("found handle %d", mHostColorBufferId);
-        } else {
-            C2GraphicView wView = mOutBlock->map().get();
-            if (wView.error()) {
-                ALOGE("graphic view map failed %d", wView.error());
-                return C2_CORRUPTED;
-            }
-            mByteBuffer =
-                const_cast<uint8_t *>(wView.data()[C2PlanarLayout::PLANE_Y]);
         }
         DDD("provided (%dx%d) required (%dx%d)", mOutBlock->width(),
-            mOutBlock->height(), ALIGN32(mWidth), mHeight);
+            mOutBlock->height(), ALIGN16(mWidth), mHeight);
     }
 
     return C2_OK;
@@ -736,34 +731,92 @@ void C2GoldfishAvcDec::getVuiParams(h264_image_t &img) {
     }
 }
 
-void C2GoldfishAvcDec::copyImageData(uint8_t *pBuffer, h264_image_t &img) {
+void C2GoldfishAvcDec::copyImageData(h264_image_t &img) {
     getVuiParams(img);
     if (mEnableAndroidNativeBuffers)
         return;
-    int myStride = mWidth;
-    for (int i = 0; i < mHeight; ++i) {
-        memcpy(pBuffer + i * myStride, img.data + i * mWidth, mWidth);
+
+    auto writeView = mOutBlock->map().get();
+    if (writeView.error()) {
+        ALOGE("graphic view map failed %d", writeView.error());
+        return;
     }
-    int Y = myStride * mHeight;
+    size_t dstYStride = writeView.layout().planes[C2PlanarLayout::PLANE_Y].rowInc;
+    size_t dstUVStride = writeView.layout().planes[C2PlanarLayout::PLANE_U].rowInc;
+
+    uint8_t *pYBuffer = const_cast<uint8_t *>(writeView.data()[C2PlanarLayout::PLANE_Y]);
+    uint8_t *pUBuffer = const_cast<uint8_t *>(writeView.data()[C2PlanarLayout::PLANE_U]);
+    uint8_t *pVBuffer = const_cast<uint8_t *>(writeView.data()[C2PlanarLayout::PLANE_V]);
+
+    for (int i = 0; i < mHeight; ++i) {
+        memcpy(pYBuffer + i * dstYStride, img.data + i * mWidth, mWidth);
+    }
     for (int i = 0; i < mHeight / 2; ++i) {
-        memcpy(pBuffer + Y + i * myStride / 2,
+        memcpy(pUBuffer + i * dstUVStride,
                img.data + mWidth * mHeight + i * mWidth / 2, mWidth / 2);
     }
-    int UV = Y / 4;
     for (int i = 0; i < mHeight / 2; ++i) {
-        memcpy(pBuffer + Y + UV + i * myStride / 2,
+        memcpy(pVBuffer + i * dstUVStride,
                img.data + mWidth * mHeight * 5 / 4 + i * mWidth / 2,
                mWidth / 2);
     }
 }
 
-void C2GoldfishAvcDec::removePts(uint64_t pts) {
+uint64_t C2GoldfishAvcDec::getWorkIndex(uint64_t pts) {
+    if (!mOldPts2Index.empty()) {
+        auto iter = mOldPts2Index.find(pts);
+        if (iter != mOldPts2Index.end()) {
+            auto index = iter->second;
+            DDD("found index %d for pts %" PRIu64, (int)index, pts);
+            return index;
+        }
+    }
     auto iter = mPts2Index.find(pts);
-    if (iter == mPts2Index.end()) return;
+    if (iter != mPts2Index.end()) {
+        auto index = iter->second;
+        DDD("found index %d for pts %" PRIu64, (int)index, pts);
+        return index;
+    }
+    DDD("not found index for pts %" PRIu64, pts);
+    return 0;
+}
 
-    auto index = iter->second;
+void C2GoldfishAvcDec::insertPts(uint32_t work_index, uint64_t pts) {
+    auto iter = mPts2Index.find(pts);
+    if (iter != mPts2Index.end()) {
+        // we have a collision here:
+        // apparently, older session is not done yet,
+        // lets save them
+        DDD("inserted to old pts %" PRIu64 " with index %d", pts, (int)iter->second);
+        mOldPts2Index[iter->first] = iter->second;
+    }
+    DDD("inserted pts %" PRIu64 " with index %d", pts, (int)work_index);
+    mIndex2Pts[work_index] = pts;
+    mPts2Index[pts] = work_index;
+}
 
-    mPts2Index.erase(iter);
+void C2GoldfishAvcDec::removePts(uint64_t pts) {
+    bool found = false;
+    uint64_t index = 0;
+    // note: check old pts first to see
+    // if we have some left over, check them
+    if (!mOldPts2Index.empty()) {
+        auto iter = mOldPts2Index.find(pts);
+        if (iter != mOldPts2Index.end()) {
+            mOldPts2Index.erase(iter);
+            index = iter->second;
+            found = true;
+        }
+    } else {
+        auto iter = mPts2Index.find(pts);
+        if (iter != mPts2Index.end()) {
+            mPts2Index.erase(iter);
+            index = iter->second;
+            found = true;
+        }
+    }
+
+    if (!found) return;
 
     auto iter2 = mIndex2Pts.find(index);
     if (iter2 == mIndex2Pts.end()) return;
@@ -812,7 +865,7 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
         }
     }
     bool eos = ((work->input.flags & C2FrameData::FLAG_END_OF_STREAM) != 0);
-    bool hasPicture = false;
+    bool hasPicture = (inSize > 0);
 
     DDD("in buffer attr. size %zu timestamp %d frameindex %d, flags %x", inSize,
         (int)work->input.ordinal.timestamp.peeku(),
@@ -848,6 +901,7 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
 
             DDD("flag is %x", work->input.flags);
             if (work->input.flags & C2FrameData::FLAG_CODEC_CONFIG) {
+                hasPicture = false;
                 if (mCsd0.empty()) {
                     mCsd0.assign(mInPBuffer, mInPBuffer + mInPBufferSize);
                     DDD("assign to csd0 with %d bytpes", mInPBufferSize);
@@ -855,6 +909,8 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
                     mCsd1.assign(mInPBuffer, mInPBuffer + mInPBufferSize);
                     DDD("assign to csd1 with %d bytpes", mInPBufferSize);
                 }
+                // this is not really a valid pts from config
+                removePts(mPts);
             }
 
             uint32_t delay;
@@ -865,6 +921,7 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
             h264_result_t h264Res =
                 mContext->decodeFrame(mInPBuffer, mInPBufferSize, mIndex2Pts[mInTsMarker]);
             mConsumedBytes = h264Res.bytesProcessed;
+            DDD("decoding consumed %d", (int)mConsumedBytes);
 
             if (mHostColorBufferId > 0) {
                 mImg = mContext->renderOnHostAndReturnImageMetadata(
@@ -890,11 +947,33 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
             //            &s_decode_op);
         }
         if (mImg.data != nullptr) {
-            DDD("got data %" PRIu64,  mPts2Index[mImg.pts]);
-            hasPicture = true;
+            // check for new width and height
+            auto decodedW = mImg.width;
+            auto decodedH = mImg.height;
+            if (decodedW != mWidth || decodedH != mHeight) {
+                mWidth = decodedW;
+                mHeight = decodedH;
+
+                C2StreamPictureSizeInfo::output size(0u, mWidth, mHeight);
+                std::vector<std::unique_ptr<C2SettingResult>> failures;
+                c2_status_t err = mIntf->config({&size}, C2_MAY_BLOCK, &failures);
+                if (err == OK) {
+                    work->worklets.front()->output.configUpdate.push_back(
+                        C2Param::Copy(size));
+                    ensureDecoderState(pool);
+                } else {
+                    ALOGE("Cannot set width and height");
+                    mSignalledError = true;
+                    work->workletsProcessed = 1u;
+                    work->result = C2_CORRUPTED;
+                    return;
+                }
+            }
+
+            DDD("got data %" PRIu64 " with pts %" PRIu64,  getWorkIndex(mImg.pts), mImg.pts);
             mHeaderDecoded = true;
-            copyImageData(mByteBuffer, mImg);
-            finishWork(mPts2Index[mImg.pts], work);
+            copyImageData(mImg);
+            finishWork(getWorkIndex(mImg.pts), work);
             removePts(mImg.pts);
         } else {
             work->workletsProcessed = 0u;
@@ -907,8 +986,8 @@ void C2GoldfishAvcDec::process(const std::unique_ptr<C2Work> &work,
         drainInternal(DRAIN_COMPONENT_WITH_EOS, pool, work);
         mSignalledOutputEos = true;
     } else if (!hasPicture) {
+        DDD("no picture, fill empty work");
         fillEmptyWork(work);
-        work->workletsProcessed = 0u;
     }
 
     work->input.buffers.clear();
@@ -959,9 +1038,9 @@ C2GoldfishAvcDec::drainInternal(uint32_t drainMode,
         // TODO: maybe keep rendering to screen
         //        mImg = mContext->getImage();
         if (mImg.data != nullptr) {
-            DDD("got data in drain mode %" PRIu64, mPts2Index[mImg.pts]);
-            copyImageData(mByteBuffer, mImg);
-            finishWork(mPts2Index[mImg.pts], work);
+            DDD("got data in drain mode %" PRIu64 " with pts %" PRIu64,  getWorkIndex(mImg.pts), mImg.pts);
+            copyImageData(mImg);
+            finishWork(getWorkIndex(mImg.pts), work);
             removePts(mImg.pts);
         } else {
             fillEmptyWork(work);

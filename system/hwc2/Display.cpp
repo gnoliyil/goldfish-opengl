@@ -26,6 +26,8 @@
 namespace android {
 namespace {
 
+using android::hardware::graphics::common::V1_0::ColorTransform;
+
 std::atomic<hwc2_config_t> sNextConfigId{0};
 
 bool IsValidColorMode(android_color_mode_t mode) {
@@ -98,10 +100,9 @@ HWC2::Error Display::init(uint32_t width, uint32_t height, uint32_t dpiX,
   return HWC2::Error::None;
 }
 
-HWC2::Error Display::updateParameters(uint32_t width, uint32_t height,
-                                      uint32_t dpiX, uint32_t dpiY,
-                                      uint32_t refreshRateHz,
-                                      const std::optional<std::vector<uint8_t>>& edid) {
+HWC2::Error Display::updateParameters(
+    uint32_t width, uint32_t height, uint32_t dpiX, uint32_t dpiY,
+    uint32_t refreshRateHz, const std::optional<std::vector<uint8_t>>& edid) {
   DEBUG_LOG("%s updating display:%" PRIu64
             " width:%d height:%d dpiX:%d dpiY:%d refreshRateHz:%d",
             __FUNCTION__, mId, width, height, dpiX, dpiY, refreshRateHz);
@@ -205,8 +206,13 @@ HWC2::Error Display::destroyLayer(hwc2_layer_t layerId) {
     return HWC2::Error::BadLayer;
   }
 
-  std::remove_if(mOrderedLayers.begin(), mOrderedLayers.end(),
-                 [layerId](Layer* layer) { return layer->getId() == layerId; });
+  mOrderedLayers.erase(std::remove_if(mOrderedLayers.begin(),  //
+                                      mOrderedLayers.end(),    //
+                                      [layerId](Layer* layer) {
+                                        return layer->getId() == layerId;
+                                      }),
+                       mOrderedLayers.end());
+
   mLayers.erase(it);
 
   DEBUG_LOG("%s destroyed layer:%" PRIu64, __FUNCTION__, layerId);
@@ -305,8 +311,8 @@ HWC2::Error Display::getColorModes(uint32_t* outNumModes, int32_t* outModes) {
   }
 
   // we only support HAL_COLOR_MODE_NATIVE so far
-  uint32_t numModes =
-      std::min<uint32_t>(*outNumModes, static_cast<uint32_t>(mColorModes.size()));
+  uint32_t numModes = std::min<uint32_t>(
+      *outNumModes, static_cast<uint32_t>(mColorModes.size()));
   std::copy_n(mColorModes.cbegin(), numModes, outModes);
   *outNumModes = numModes;
   return HWC2::Error::None;
@@ -540,17 +546,38 @@ HWC2::Error Display::setColorMode(int32_t intMode) {
   return HWC2::Error::None;
 }
 
-HWC2::Error Display::setColorTransform(const float* /*matrix*/, int32_t hint) {
-  DEBUG_LOG("%s: display:%" PRIu64 " setting hint to %d", __FUNCTION__, mId,
-            hint);
+HWC2::Error Display::setColorTransform(const float* transformMatrix,
+                                       int transformTypeRaw) {
+  const auto transformType = static_cast<ColorTransform>(transformTypeRaw);
+  return setColorTransformEnum(transformMatrix, transformType);
+}
+
+HWC2::Error Display::setColorTransformEnum(const float* transformMatrix,
+                                           ColorTransform transformType) {
+  const auto transformTypeString = toString(transformType);
+  DEBUG_LOG("%s: display:%" PRIu64 " color transform type %s", __FUNCTION__,
+            mId, transformTypeString.c_str());
+
+  if (transformType == ColorTransform::ARBITRARY_MATRIX &&
+      transformMatrix == nullptr) {
+    return HWC2::Error::BadParameter;
+  }
 
   std::unique_lock<std::recursive_mutex> lock(mStateMutex);
-  // we force client composition if this is set
-  if (hint == 0) {
-    mSetColorTransform = false;
+
+  if (transformType == ColorTransform::IDENTITY) {
+    mColorTransform.reset();
   } else {
-    mSetColorTransform = true;
+    ColorTransformWithMatrix& colorTransform = mColorTransform.emplace();
+    colorTransform.transformType = transformType;
+
+    if (transformType == ColorTransform::ARBITRARY_MATRIX) {
+      auto& colorTransformMatrix = colorTransform.transformMatrixOpt.emplace();
+      std::copy_n(transformMatrix, colorTransformMatrix.size(),
+                  colorTransformMatrix.begin());
+    }
   }
+
   return HWC2::Error::None;
 }
 
@@ -755,6 +782,13 @@ static const uint8_t sEDID2[] = {
     0x70, 0x6c, 0x61, 0x79, 0x5f, 0x32, 0x00, 0x49};
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
+
+HWC2::Error Display::setEdid(std::vector<uint8_t> edid) {
+  DEBUG_LOG("%s: display:%" PRIu64, __FUNCTION__, mId);
+
+  mEdid = edid;
+  return HWC2::Error::None;
+}
 
 HWC2::Error Display::getDisplayIdentificationData(uint8_t* outPort,
                                                   uint32_t* outDataSize,
