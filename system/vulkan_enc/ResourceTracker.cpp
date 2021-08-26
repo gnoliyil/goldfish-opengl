@@ -1475,6 +1475,9 @@ public:
             filteredExts.push_back({
                 "VK_FUCHSIA_buffer_collection", 1
             });
+            filteredExts.push_back({
+                "VK_FUCHSIA_buffer_collection_x", 1
+            });
 #endif
         }
 
@@ -3191,8 +3194,19 @@ public:
         const VkImportAndroidHardwareBufferInfoANDROID* importAhbInfoPtr =
             vk_find_struct<VkImportAndroidHardwareBufferInfoANDROID>(pAllocateInfo);
 
-        const VkImportMemoryBufferCollectionFUCHSIA* importBufferCollectionInfoPtr =
-            vk_find_struct<VkImportMemoryBufferCollectionFUCHSIA>(pAllocateInfo);
+        const VkImportMemoryBufferCollectionFUCHSIAX*
+            importBufferCollectionInfoPtr =
+                vk_find_struct<VkImportMemoryBufferCollectionFUCHSIAX>(
+                    pAllocateInfo);
+
+        // TODO(fxbug.dev/73447): remove this once we finish migration to
+        // FUCHSIAX.
+        if (!importBufferCollectionInfoPtr) {
+            importBufferCollectionInfoPtr =
+                reinterpret_cast<const VkImportMemoryBufferCollectionFUCHSIAX*>(
+                    vk_find_struct<VkImportMemoryBufferCollectionFUCHSIA>(
+                        pAllocateInfo));
+        }
 
         const VkImportMemoryZirconHandleInfoFUCHSIA* importVmoInfoPtr =
             vk_find_struct<VkImportMemoryZirconHandleInfoFUCHSIA>(pAllocateInfo);
@@ -4179,9 +4193,12 @@ public:
 
                     auto result =
                         mControlDevice->CreateColorBuffer2(std::move(vmo), std::move(createParams));
-                    if (!result.ok() || result.Unwrap()->res != ZX_OK) {
+                    if (result.ok() && result.Unwrap()->res == ZX_ERR_ALREADY_EXISTS) {
+                        ALOGD(
+                            "CreateColorBuffer: color buffer already exists\n");
+                    } else if (!result.ok() || result.Unwrap()->res != ZX_OK) {
                         ALOGE("CreateColorBuffer failed: %d:%d", result.status(),
-                              GET_STATUS_SAFE(result, res));
+                            GET_STATUS_SAFE(result, res));
                     }
                 }
 
