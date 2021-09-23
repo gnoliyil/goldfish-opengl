@@ -198,15 +198,13 @@ HWC2::Error HostComposer::createHostComposerDisplayInfo(
     return error;
   }
 
-  auto it = mDisplayInfos.find(displayId);
-  if (it != mDisplayInfos.end()) {
-    ALOGE("%s: display:%" PRIu64 " already created?", __FUNCTION__, displayId);
-  }
-
   HostComposerDisplayInfo& displayInfo = mDisplayInfos[displayId];
 
   displayInfo.hostDisplayId = hostDisplayId;
 
+  if (displayInfo.compositionResultBuffer) {
+      FreeDisplayColorBuffer(displayInfo.compositionResultBuffer);
+  }
   displayInfo.compositionResultBuffer =
       AllocateDisplayColorBuffer(displayWidth, displayHeight);
   if (displayInfo.compositionResultBuffer == nullptr) {
@@ -582,53 +580,31 @@ HWC2::Error HostComposer::presentDisplay(Display* display,
       p2->numLayers = numLayer;
     }
 
+    void *buffer;
+    uint32_t bufferSize;
+    if (hostCompositionV1) {
+      buffer = (void*)p;
+      bufferSize = sizeof(ComposeDevice) + numLayer * sizeof(ComposeLayer);
+    } else {
+      bufferSize = sizeof(ComposeDevice_v2) + numLayer * sizeof(ComposeLayer);
+      buffer = (void*)p2;
+    }
+
+    int retire_fd = -1;
     hostCon->lock();
     if (rcEnc->hasAsyncFrameCommands()) {
       if (mIsMinigbm) {
-        if (hostCompositionV1) {
-          rcEnc->rcComposeAsyncWithoutPost(
-              rcEnc, sizeof(ComposeDevice) + numLayer * sizeof(ComposeLayer),
-              (void*)p);
-        } else {
-          rcEnc->rcComposeAsyncWithoutPost(
-              rcEnc, sizeof(ComposeDevice_v2) + numLayer * sizeof(ComposeLayer),
-              (void*)p2);
-        }
+        rcEnc->rcComposeAsyncWithoutPost(rcEnc, bufferSize, buffer);
       } else {
-        if (hostCompositionV1) {
-          rcEnc->rcComposeAsync(
-              rcEnc, sizeof(ComposeDevice) + numLayer * sizeof(ComposeLayer),
-              (void*)p);
-        } else {
-          rcEnc->rcComposeAsync(
-              rcEnc, sizeof(ComposeDevice_v2) + numLayer * sizeof(ComposeLayer),
-              (void*)p2);
-        }
+        rcEnc->rcComposeAsync(rcEnc, bufferSize, buffer);
       }
     } else {
       if (mIsMinigbm) {
-        if (hostCompositionV1) {
-          rcEnc->rcComposeWithoutPost(
-              rcEnc, sizeof(ComposeDevice) + numLayer * sizeof(ComposeLayer),
-              (void*)p);
-        } else {
-          rcEnc->rcComposeWithoutPost(
-              rcEnc, sizeof(ComposeDevice_v2) + numLayer * sizeof(ComposeLayer),
-              (void*)p2);
-        }
+        rcEnc->rcComposeWithoutPost(rcEnc, bufferSize, buffer);
       } else {
-        if (hostCompositionV1) {
-          rcEnc->rcCompose(
-              rcEnc, sizeof(ComposeDevice) + numLayer * sizeof(ComposeLayer),
-              (void*)p);
-        } else {
-          rcEnc->rcCompose(
-              rcEnc, sizeof(ComposeDevice_v2) + numLayer * sizeof(ComposeLayer),
-              (void*)p2);
-        }
+        rcEnc->rcCompose(rcEnc, bufferSize, buffer);
       }
     }
-
     hostCon->unlock();
 
     // Send a retire fence and use it as the release fence for all layers,
@@ -637,7 +613,6 @@ HWC2::Error HostComposer::presentDisplay(Display* display,
                         EGL_NO_NATIVE_FENCE_FD_ANDROID};
 
     uint64_t sync_handle, thread_handle;
-    int retire_fd;
 
     // We don't use rc command to sync if we are using ANGLE on the guest with
     // virtio-gpu.
@@ -703,6 +678,17 @@ void HostComposer::post(HostConnection* hostCon,
   rcEnc->rcFBPost(rcEnc, hostCon->grallocHelper()->getHostHandle(h));
   hostCon->flush();
   hostCon->unlock();
+}
+
+HWC2::Error HostComposer::onActiveConfigChange(Display* display) {
+  DEBUG_LOG("%s: display:%" PRIu64, __FUNCTION__, display->getId());
+  HWC2::Error error = createHostComposerDisplayInfo(display, display->getId());
+  if (error != HWC2::Error::None) {
+    ALOGE("%s failed to update host info for display:%" PRIu64,
+          __FUNCTION__, display->getId());
+    return error;
+  }
+  return HWC2::Error::None;
 }
 
 }  // namespace android
