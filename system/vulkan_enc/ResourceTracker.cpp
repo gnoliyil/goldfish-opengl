@@ -31,9 +31,6 @@
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
 
 #include "../egl/goldfish_sync.h"
-#ifndef HOST_BUILD
-#include "virtio_gpu_context_init.h"
-#endif
 
 typedef uint32_t zx_handle_t;
 typedef uint64_t zx_koid_t;
@@ -45,11 +42,9 @@ void zx_event_create(int, zx_handle_t*) { }
 #include "AndroidHardwareBuffer.h"
 
 #ifndef HOST_BUILD
-#include <drm/virtgpu_drm.h>
+#include "virtgpu_drm.h"
 #include <xf86drm.h>
 #endif
-
-#include "VirtioGpuNext.h"
 
 #endif // VK_USE_PLATFORM_ANDROID_KHR
 
@@ -551,6 +546,7 @@ public:
         }
 
         if (memInfo.directMapped) {
+            ALOGE("%s: warning: direct mapped memory never goes to unregister!\n", __func__);
             subFreeHostMemory(&memInfo.subAlloc);
         }
 
@@ -2949,16 +2945,37 @@ public:
         HostMemBlockIndex res = 0;
         bool found = false;
 
+        VkMemoryAllocateFlagsInfo allocFlagsInfo;
+        VkMemoryOpaqueCaptureAddressAllocateInfo opaqueCaptureAddressAllocInfo;
+
+        // Add buffer device address capture structs
+        const VkMemoryAllocateFlagsInfo* allocFlagsInfoPtr =
+            vk_find_struct<VkMemoryAllocateFlagsInfo>(pAllocateInfo);
+        const VkMemoryOpaqueCaptureAddressAllocateInfo* opaqueCaptureAddressAllocInfoPtr =
+            vk_find_struct<VkMemoryOpaqueCaptureAddressAllocateInfo>(pAllocateInfo);
+
+        bool isDeviceAddressMemoryAllocation =
+            allocFlagsInfoPtr && ((allocFlagsInfoPtr->flags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT) ||
+               (allocFlagsInfoPtr->flags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT));
+        bool isDedicated = isDeviceAddressMemoryAllocation;
+
         while (!found) {
-            for (HostMemBlockIndex i = 0; i < blocks.size(); ++i) {
-                if (blocks[i].initialized &&
-                    blocks[i].initResult == VK_SUCCESS &&
-                    canSubAlloc(
-                        blocks[i].subAlloc,
-                        pAllocateInfo->allocationSize)) {
-                    res = i;
-                    found = true;
-                    return res;
+            // If we need a dedicated host mapping, found = true necessarily
+            if (isDedicated) {
+                found = true;
+            } else {
+                for (HostMemBlockIndex i = 0; i < blocks.size(); ++i) {
+                    if (blocks[i].initialized &&
+                        blocks[i].initResult == VK_SUCCESS &&
+                        !blocks[i].isDedicated &&
+                        blocks[i].isDeviceAddressMemoryAllocation == isDeviceAddressMemoryAllocation &&
+                        canSubAlloc(
+                            blocks[i].subAlloc,
+                            pAllocateInfo->allocationSize)) {
+                        res = i;
+                        found = true;
+                        return res;
+                    }
                 }
             }
 
@@ -2966,12 +2983,20 @@ public:
 
             auto& hostMemAlloc = blocks.back();
 
+            hostMemAlloc.isDedicated = isDedicated;
+
             // Uninitialized block; allocate on host.
             static constexpr VkDeviceSize oneMb = 1048576;
+            // This needs to be a power of 2 that is at least the min alignment needed in HostVisibleMemoryVirtualization.cpp.
+            static constexpr VkDeviceSize biggestPage = 65536;
             static constexpr VkDeviceSize kDefaultHostMemBlockSize =
                 16 * oneMb; // 16 mb
             VkDeviceSize roundedUpAllocSize =
                 oneMb * ((pAllocateInfo->allocationSize + oneMb - 1) / oneMb);
+
+            // If dedicated, use a smaller "page rounded alloc size".
+            VkDeviceSize pageRoundedAllocSize =
+                biggestPage * ((pAllocateInfo->allocationSize + biggestPage - 1) / biggestPage);
 
             VkDeviceSize virtualHeapSize = VIRTUAL_HOST_VISIBLE_HEAP_SIZE;
 
@@ -2980,12 +3005,32 @@ public:
                     std::min(virtualHeapSize,
                              kDefaultHostMemBlockSize));
 
-            VkMemoryAllocateInfo allocInfoForHost = *pAllocateInfo;
+            VkMemoryAllocateInfo allocInfoForHost = vk_make_orphan_copy(*pAllocateInfo);
+            vk_struct_chain_iterator structChainIter = vk_make_chain_iterator(&allocInfoForHost);
 
             allocInfoForHost.allocationSize = blockSizeNeeded;
 
+            if (isDedicated) {
+                allocInfoForHost.allocationSize = pageRoundedAllocSize;
+            }
+
             // TODO: Support dedicated/external host visible allocation
-            allocInfoForHost.pNext = nullptr;
+
+            // Support device address capture/replay allocations
+            if (isDeviceAddressMemoryAllocation) {
+                hostMemAlloc.isDeviceAddressMemoryAllocation = true;
+                if (allocFlagsInfoPtr) {
+                    ALOGV("%s: has alloc flags\n", __func__);
+                    allocFlagsInfo = *allocFlagsInfoPtr;
+                    vk_append_struct(&structChainIter, &allocFlagsInfo);
+                }
+
+                if (opaqueCaptureAddressAllocInfoPtr) {
+                    ALOGV("%s: has opaque capture address\n", __func__);
+                    opaqueCaptureAddressAllocInfo = *opaqueCaptureAddressAllocInfoPtr;
+                    vk_append_struct(&structChainIter, &opaqueCaptureAddressAllocInfo);
+                }
+            }
 
             mLock.unlock();
             VkResult host_res =
@@ -3015,13 +3060,14 @@ public:
 
             uint64_t directMappedAddr = 0;
 
-
             VkResult directMapResult = VK_SUCCESS;
             if (mFeatureInfo->hasDirectMem) {
                 mLock.unlock();
                 directMapResult =
                     enc->vkMapMemoryIntoAddressSpaceGOOGLE(
                             device, hostMemAlloc.memory, &directMappedAddr, true /* do lock */);
+                ALOGV("%s: direct mapped addr 0x%llx\n", __func__,
+                      (unsigned long long)directMappedAddr);
                 mLock.lock();
             } else if (mFeatureInfo->hasVirtioGpuNext) {
 #if !defined(HOST_BUILD) && defined(VK_USE_PLATFORM_ANDROID_KHR)
@@ -3041,8 +3087,8 @@ public:
                 mLock.lock();
 
                 struct drm_virtgpu_resource_create_blob drm_rc_blob = { 0 };
-                drm_rc_blob.blob_mem = VIRTGPU_BLOB_MEM_HOST;
-                drm_rc_blob.blob_flags = VIRTGPU_BLOB_FLAG_MAPPABLE;
+                drm_rc_blob.blob_mem = VIRTGPU_BLOB_MEM_HOST3D;
+                drm_rc_blob.blob_flags = VIRTGPU_BLOB_FLAG_USE_MAPPABLE;
                 drm_rc_blob.blob_id = hvaSizeId[2];
                 drm_rc_blob.size = hvaSizeId[1];
 
@@ -3086,6 +3132,7 @@ public:
             }
 
             if (directMapResult != VK_SUCCESS) {
+                ALOGE("%s: error: directMapResult != VK_SUCCESS\n", __func__);
                 hostMemAlloc.initialized = true;
                 hostMemAlloc.initResult = directMapResult;
                 mLock.unlock();
@@ -3097,6 +3144,7 @@ public:
             hostMemInfo.mappedPtr =
                 (uint8_t*)(uintptr_t)directMappedAddr;
             hostMemInfo.virtualHostVisibleBacking = true;
+            ALOGV("%s: Set mapped ptr to %p\n", __func__, hostMemInfo.mappedPtr);
 
             VkResult hostMemAllocRes =
                 finishHostMemAllocInit(
@@ -3111,6 +3159,11 @@ public:
 
             if (hostMemAllocRes != VK_SUCCESS) {
                 return INVALID_HOST_MEM_BLOCK;
+            }
+
+            if (isDedicated) {
+                ALOGV("%s: New dedicated block at %zu\n", __func__, blocks.size() - 1);
+                return blocks.size() - 1;
             }
         }
 
@@ -3175,6 +3228,27 @@ public:
 
         VkMemoryAllocateInfo finalAllocInfo = vk_make_orphan_copy(*pAllocateInfo);
         vk_struct_chain_iterator structChainIter = vk_make_chain_iterator(&finalAllocInfo);
+
+        VkMemoryAllocateFlagsInfo allocFlagsInfo;
+        VkMemoryOpaqueCaptureAddressAllocateInfo opaqueCaptureAddressAllocInfo;
+
+        // Add buffer device address capture structs
+        const VkMemoryAllocateFlagsInfo* allocFlagsInfoPtr =
+            vk_find_struct<VkMemoryAllocateFlagsInfo>(pAllocateInfo);
+        const VkMemoryOpaqueCaptureAddressAllocateInfo* opaqueCaptureAddressAllocInfoPtr =
+            vk_find_struct<VkMemoryOpaqueCaptureAddressAllocateInfo>(pAllocateInfo);
+
+        if (allocFlagsInfoPtr) {
+            ALOGV("%s: has alloc flags\n", __func__);
+            allocFlagsInfo = *allocFlagsInfoPtr;
+            vk_append_struct(&structChainIter, &allocFlagsInfo);
+        }
+
+        if (opaqueCaptureAddressAllocInfoPtr) {
+            ALOGV("%s: has opaque capture address\n", __func__);
+            opaqueCaptureAddressAllocInfo = *opaqueCaptureAddressAllocInfoPtr;
+            vk_append_struct(&structChainIter, &opaqueCaptureAddressAllocInfo);
+        }
 
         VkMemoryDedicatedAllocateInfo dedicatedAllocInfo;
         VkImportColorBufferGOOGLE importCbInfo = {
@@ -3870,7 +3944,60 @@ public:
             return;
         }
 
-        subFreeHostMemory(&info.subAlloc);
+        VkDeviceMemory baseMemory = info.subAlloc.baseMemory;
+        uint32_t memoryTypeIndex = info.subAlloc.memoryTypeIndex;
+        bool isDeviceAddressMemoryAllocation = info.subAlloc.isDeviceAddressMemoryAllocation;
+        // If this was a device address memory allocation,
+        // free it right away.
+        // TODO: Retest with eagerly freeing other kinds of host visible
+        // allocs as well
+        if (subFreeHostMemory(&info.subAlloc) && isDeviceAddressMemoryAllocation) {
+            ALOGV("%s: Last free for this device-address block, "
+                  "free on host and clear block contents\n", __func__);
+            ALOGV("%s: baseMem 0x%llx this mem 0x%llx\n", __func__,
+                    (unsigned long long)baseMemory,
+                    (unsigned long long)memory);
+            VkEncoder* enc = (VkEncoder*)context;
+            bool freeMemorySyncSupported =
+                mFeatureInfo->hasVulkanFreeMemorySync;
+
+            auto it = info_VkDevice.find(device);
+            if (it == info_VkDevice.end()) {
+                ALOGE("%s: Last free: could not find device\n", __func__);
+                return;
+            }
+
+            auto& deviceInfo = it->second;
+
+            auto& hostMemBlocksForTypeIndex =
+                deviceInfo.hostMemBlocks[memoryTypeIndex];
+
+            size_t indexToRemove = 0;
+            bool found = false;
+            for (const auto& allocInfo : hostMemBlocksForTypeIndex) {
+                if (baseMemory == allocInfo.memory) {
+                    found = true;
+                    break;
+                }
+                ++indexToRemove;
+            }
+
+            if (!found) {
+                ALOGE("%s: Last free: could not find original block\n", __func__);
+                return;
+            }
+
+            ALOGV("%s: Destroying host mem alloc block at index %zu\n", __func__, indexToRemove);
+
+            destroyHostMemAlloc(
+                freeMemorySyncSupported,
+                enc, device,
+                hostMemBlocksForTypeIndex.data() + indexToRemove);
+
+            ALOGV("%s: Destroying host mem alloc block at index %zu (done)\n", __func__, indexToRemove);
+
+            hostMemBlocksForTypeIndex.erase(hostMemBlocksForTypeIndex.begin() + indexToRemove);
+        }
     }
 
     VkResult on_vkMapMemory(
@@ -3883,19 +4010,33 @@ public:
         VkMemoryMapFlags,
         void** ppData) {
 
-        if (host_result != VK_SUCCESS) return host_result;
+        if (host_result != VK_SUCCESS) {
+            ALOGE("%s: Host failed to map\n", __func__);
+            return host_result;
+        }
 
         AutoLock lock(mLock);
 
         auto it = info_VkDeviceMemory.find(memory);
-        if (it == info_VkDeviceMemory.end()) return VK_ERROR_MEMORY_MAP_FAILED;
+        if (it == info_VkDeviceMemory.end()) {
+            ALOGE("%s: Could not find this device memory\n", __func__);
+            return VK_ERROR_MEMORY_MAP_FAILED;
+        }
 
         auto& info = it->second;
 
-        if (!info.mappedPtr) return VK_ERROR_MEMORY_MAP_FAILED;
+        if (!info.mappedPtr) {
+            ALOGE("%s: mappedPtr null\n", __func__);
+            return VK_ERROR_MEMORY_MAP_FAILED;
+        }
 
         if (size != VK_WHOLE_SIZE &&
             (info.mappedPtr + offset + size > info.mappedPtr + info.allocationSize)) {
+            ALOGE("%s: size is too big. alloc size 0x%llx while we wanted offset 0x%llx size 0x%llx total 0x%llx\n", __func__,
+                    (unsigned long long)info.allocationSize,
+                    (unsigned long long)offset,
+                    (unsigned long long)size,
+                    (unsigned long long)offset);
             return VK_ERROR_MEMORY_MAP_FAILED;
         }
 
@@ -4669,9 +4810,9 @@ public:
                     hostFenceHandleHi,
                 };
 
-                struct drm_virtgpu_execbuffer_with_ring_idx execbuffer = {
+                struct drm_virtgpu_execbuffer execbuffer = {
                     .flags = (uint32_t)(mFeatureInfo->hasVulkanAsyncQsri ?
-                                        (VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_FENCE_CONTEXT) :
+                                        (VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_RING_IDX) :
                                         VIRTGPU_EXECBUF_FENCE_FD_OUT),
                     .size = 5 * sizeof(uint32_t),
                     .command = (uint64_t)(cmdDwords),
@@ -5463,9 +5604,9 @@ public:
                     hostFenceHandleHi,
                 };
 
-                struct drm_virtgpu_execbuffer_with_ring_idx execbuffer = {
+                struct drm_virtgpu_execbuffer execbuffer = {
                     .flags = (uint32_t)(mFeatureInfo->hasVulkanAsyncQsri ?
-                                        (VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_FENCE_CONTEXT) :
+                                        (VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_RING_IDX) :
                                         VIRTGPU_EXECBUF_FENCE_FD_OUT),
                     .size = 5 * sizeof(uint32_t),
                     .command = (uint64_t)(cmdDwords),
@@ -6926,9 +7067,9 @@ public:
                 hostImageHandleHi,
             };
 
-            struct drm_virtgpu_execbuffer_with_ring_idx execbuffer = {
+            struct drm_virtgpu_execbuffer execbuffer = {
                 // Assume fence context support if we enabled hasVulkanAsyncQsri
-                .flags = VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_FENCE_CONTEXT,
+                .flags = VIRTGPU_EXECBUF_FENCE_FD_OUT | VIRTGPU_EXECBUF_RING_IDX,
                 .size = sizeof(cmdDwords),
                 .command = (uint64_t)(cmdDwords),
                 .bo_handles = 0,
