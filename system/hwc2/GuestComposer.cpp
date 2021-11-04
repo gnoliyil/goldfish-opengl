@@ -23,6 +23,7 @@
 #include <device_config_shared.h>
 #include <drm_fourcc.h>
 #include <libyuv.h>
+#include <sync/sync.h>
 #include <ui/GraphicBuffer.h>
 #include <ui/GraphicBufferAllocator.h>
 #include <ui/GraphicBufferMapper.h>
@@ -455,19 +456,14 @@ HWC2::Error GuestComposer::onDisplayCreate(Display* display) {
       displayInfo.compositionResultBuffer, mDrmPresenter);
 
   if (displayId == 0) {
-    int flushSyncFd = -1;
-
-    HWC2::Error flushError =
-        displayInfo.compositionResultDrmBuffer->flushToDisplay(displayId,
-                                                               &flushSyncFd);
+    auto [flushError, flushSyncFd] =
+        displayInfo.compositionResultDrmBuffer->flushToDisplay(displayId, -1);
     if (flushError != HWC2::Error::None) {
       ALOGW(
           "%s: Initial display flush failed. HWComposer assuming that we are "
           "running in QEMU without a display and disabling presenting.",
           __FUNCTION__);
       mPresentDisabled = true;
-    } else {
-      close(flushSyncFd);
     }
   }
 
@@ -654,19 +650,19 @@ HWC2::Error GuestComposer::validateDisplay(
   return HWC2::Error::None;
 }
 
-HWC2::Error GuestComposer::presentDisplay(Display* display,
-                                          int32_t* outRetireFence) {
+std::tuple<HWC2::Error, base::unique_fd> GuestComposer::presentDisplay(
+    Display* display) {
   const auto displayId = display->getId();
   DEBUG_LOG("%s display:%" PRIu64, __FUNCTION__, displayId);
 
   if (mPresentDisabled) {
-    return HWC2::Error::None;
+    return std::make_tuple(HWC2::Error::None, base::unique_fd());
   }
 
   auto it = mDisplayInfos.find(displayId);
   if (it == mDisplayInfos.end()) {
     ALOGE("%s: display:%" PRIu64 " not found", __FUNCTION__, displayId);
-    return HWC2::Error::NoResources;
+    return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
   }
 
   GuestComposerDisplayInfo& displayInfo = it->second;
@@ -674,7 +670,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
   if (displayInfo.compositionResultBuffer == nullptr) {
     ALOGE("%s: display:%" PRIu64 " missing composition result buffer",
           __FUNCTION__, displayId);
-    return HWC2::Error::NoResources;
+    return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
   }
 
   std::optional<GrallocBuffer> compositionResultBufferOpt =
@@ -682,7 +678,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
   if (!compositionResultBufferOpt) {
     ALOGE("%s: display:%" PRIu64 " failed to import buffer", __FUNCTION__,
           displayId);
-    return HWC2::Error::NoResources;
+    return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
   }
 
   std::optional<uint32_t> compositionResultBufferWidthOpt =
@@ -690,7 +686,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
   if (!compositionResultBufferWidthOpt) {
     ALOGE("%s: display:%" PRIu64 " failed to query buffer width", __FUNCTION__,
           displayId);
-    return HWC2::Error::NoResources;
+    return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
   }
 
   std::optional<uint32_t> compositionResultBufferHeightOpt =
@@ -698,7 +694,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
   if (!compositionResultBufferHeightOpt) {
     ALOGE("%s: display:%" PRIu64 " failed to query buffer height", __FUNCTION__,
           displayId);
-    return HWC2::Error::NoResources;
+    return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
   }
 
   std::optional<uint32_t> compositionResultBufferStrideOpt =
@@ -706,7 +702,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
   if (!compositionResultBufferStrideOpt) {
     ALOGE("%s: display:%" PRIu64 " failed to query buffer stride", __FUNCTION__,
           displayId);
-    return HWC2::Error::NoResources;
+    return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
   }
 
   std::optional<GrallocBufferView> compositionResultBufferViewOpt =
@@ -714,7 +710,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
   if (!compositionResultBufferViewOpt) {
     ALOGE("%s: display:%" PRIu64 " failed to get buffer view", __FUNCTION__,
           displayId);
-    return HWC2::Error::NoResources;
+    return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
   }
 
   const std::optional<void*> compositionResultBufferDataOpt =
@@ -722,7 +718,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
   if (!compositionResultBufferDataOpt) {
     ALOGE("%s: display:%" PRIu64 " failed to get buffer data", __FUNCTION__,
           displayId);
-    return HWC2::Error::NoResources;
+    return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
   }
 
   uint32_t compositionResultBufferWidth = *compositionResultBufferWidthOpt;
@@ -748,27 +744,27 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
         mGralloc.Import(display->waitAndGetClientTargetBuffer());
     if (!clientTargetBufferOpt) {
       ALOGE("%s: failed to import client target buffer.", __FUNCTION__);
-      return HWC2::Error::NoResources;
+      return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
     }
     GrallocBuffer& clientTargetBuffer = *clientTargetBufferOpt;
 
     auto clientTargetBufferViewOpt = clientTargetBuffer.Lock();
     if (!clientTargetBufferViewOpt) {
       ALOGE("%s: failed to lock client target buffer.", __FUNCTION__);
-      return HWC2::Error::NoResources;
+      return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
     }
     GrallocBufferView& clientTargetBufferView = *clientTargetBufferViewOpt;
 
     auto clientTargetPlaneLayoutsOpt = clientTargetBuffer.GetPlaneLayouts();
     if (!clientTargetPlaneLayoutsOpt) {
       ALOGE("Failed to get client target buffer plane layouts.");
-      return HWC2::Error::NoResources;
+      return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
     }
     auto& clientTargetPlaneLayouts = *clientTargetPlaneLayoutsOpt;
 
     if (clientTargetPlaneLayouts.size() != 1) {
       ALOGE("Unexpected number of plane layouts for client target buffer.");
-      return HWC2::Error::NoResources;
+      return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
     }
 
     std::size_t clientTargetPlaneSize =
@@ -777,7 +773,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
     auto clientTargetDataOpt = clientTargetBufferView.Get();
     if (!clientTargetDataOpt) {
       ALOGE("%s failed to lock gralloc buffer.", __FUNCTION__);
-      return HWC2::Error::NoResources;
+      return std::make_tuple(HWC2::Error::NoResources, base::unique_fd());
     }
     auto* clientTargetData = reinterpret_cast<uint8_t*>(*clientTargetDataOpt);
 
@@ -800,7 +796,7 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
       if (error != HWC2::Error::None) {
         ALOGE("%s: display:%" PRIu64 " failed to compose layer:%" PRIu64,
               __FUNCTION__, displayId, layerId);
-        return error;
+        return std::make_tuple(error, base::unique_fd());
       }
     }
   }
@@ -818,20 +814,21 @@ HWC2::Error GuestComposer::presentDisplay(Display* display,
     if (error != HWC2::Error::None) {
       ALOGE("%s: display:%" PRIu64 " failed to apply color transform",
             __FUNCTION__, displayId);
-      return error;
+      return std::make_tuple(error, base::unique_fd());
     }
   }
 
   DEBUG_LOG("%s display:%" PRIu64 " flushing drm buffer", __FUNCTION__,
             displayId);
 
-  HWC2::Error error = displayInfo.compositionResultDrmBuffer->flushToDisplay(
-      static_cast<int>(displayId), outRetireFence);
+  auto [error, outRetireFence] =
+      displayInfo.compositionResultDrmBuffer->flushToDisplay(
+          static_cast<int>(displayId), -1);
   if (error != HWC2::Error::None) {
     ALOGE("%s: display:%" PRIu64 " failed to flush drm buffer" PRIu64,
           __FUNCTION__, displayId);
   }
-  return error;
+  return std::make_tuple(error, std::move(outRetireFence));
 }
 
 bool GuestComposer::canComposeLayer(Layer* layer) {
