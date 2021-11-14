@@ -3679,10 +3679,10 @@ public:
                         fidl::Arena arena;
                         fuchsia_hardware_goldfish::wire::CreateColorBuffer2Params createParams(
                             arena);
-                        createParams.set_width(arena, pImageCreateInfo->extent.width)
-                            .set_height(arena, pImageCreateInfo->extent.height)
-                            .set_format(arena, format)
-                            .set_memory_property(arena,
+                        createParams.set_width(pImageCreateInfo->extent.width)
+                            .set_height(pImageCreateInfo->extent.height)
+                            .set_format(format)
+                            .set_memory_property(
                                 fuchsia_hardware_goldfish::wire::kMemoryPropertyDeviceLocal);
 
                         auto result = mControlDevice->CreateColorBuffer2(
@@ -3708,7 +3708,7 @@ public:
                     fuchsia_hardware_goldfish::wire::CreateBuffer2Params createParams(arena);
                     createParams.set_size(arena,
                             pBufferConstraintsInfo->pBufferCreateInfo->size)
-                        .set_memory_property(arena,
+                        .set_memory_property(
                             fuchsia_hardware_goldfish::wire::kMemoryPropertyDeviceLocal);
 
                     auto result =
@@ -4331,12 +4331,12 @@ public:
                     fidl::Arena arena;
                     fuchsia_hardware_goldfish::wire::CreateColorBuffer2Params createParams(
                         arena);
-                    createParams.set_width(arena,
+                    createParams.set_width(
                             info.settings.image_format_constraints.min_coded_width)
-                        .set_height(arena,
+                        .set_height(
                             info.settings.image_format_constraints.min_coded_height)
-                        .set_format(arena, format)
-                        .set_memory_property(arena, memory_property);
+                        .set_format(format)
+                        .set_memory_property(memory_property);
 
                     auto result =
                         mControlDevice->CreateColorBuffer2(std::move(vmo), std::move(createParams));
@@ -5369,7 +5369,7 @@ public:
                 fidl::Arena arena;
                 fuchsia_hardware_goldfish::wire::CreateBuffer2Params createParams(arena);
                 createParams.set_size(arena, pCreateInfo->size)
-                    .set_memory_property(arena,
+                    .set_memory_property(
                         fuchsia_hardware_goldfish::wire::kMemoryPropertyDeviceLocal);
 
                 auto result =
@@ -7388,7 +7388,7 @@ void ResourceTracker::resetCommandPoolStagingInfo(VkCommandPool commandPool) {
 
 
 // static
-__attribute__((always_inline)) VkEncoder* ResourceTracker::getCommandBufferEncoder(VkCommandBuffer commandBuffer) {
+ALWAYS_INLINE VkEncoder* ResourceTracker::getCommandBufferEncoder(VkCommandBuffer commandBuffer) {
     if (!(ResourceTracker::streamFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT)) {
         auto enc = ResourceTracker::getThreadLocalEncoder();
         ResourceTracker::get()->syncEncodersForCommandBuffer(commandBuffer, enc);
@@ -7405,7 +7405,7 @@ __attribute__((always_inline)) VkEncoder* ResourceTracker::getCommandBufferEncod
 }
 
 // static
-__attribute__((always_inline)) VkEncoder* ResourceTracker::getQueueEncoder(VkQueue queue) {
+ALWAYS_INLINE VkEncoder* ResourceTracker::getQueueEncoder(VkQueue queue) {
     auto enc = ResourceTracker::getThreadLocalEncoder();
     if (!(ResourceTracker::streamFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT)) {
         ResourceTracker::get()->syncEncodersForQueue(queue, enc);
@@ -7414,7 +7414,7 @@ __attribute__((always_inline)) VkEncoder* ResourceTracker::getQueueEncoder(VkQue
 }
 
 // static
-__attribute__((always_inline)) VkEncoder* ResourceTracker::getThreadLocalEncoder() {
+ALWAYS_INLINE VkEncoder* ResourceTracker::getThreadLocalEncoder() {
     auto hostConn = ResourceTracker::threadingCallbacks.hostConnectionGetFunc();
     auto vkEncoder = ResourceTracker::threadingCallbacks.vkEncoderGetFunc(hostConn);
     return vkEncoder;
@@ -7426,13 +7426,13 @@ void ResourceTracker::setSeqnoPtr(uint32_t* seqnoptr) {
 }
 
 // static
-__attribute__((always_inline)) uint32_t ResourceTracker::nextSeqno() {
+ALWAYS_INLINE uint32_t ResourceTracker::nextSeqno() {
     uint32_t res = __atomic_add_fetch(sSeqnoPtr, 1, __ATOMIC_SEQ_CST);
     return res;
 }
 
 // static
-__attribute__((always_inline)) uint32_t ResourceTracker::getSeqno() {
+ALWAYS_INLINE uint32_t ResourceTracker::getSeqno() {
     uint32_t res = __atomic_load_n(sSeqnoPtr, __ATOMIC_SEQ_CST);
     return res;
 }
