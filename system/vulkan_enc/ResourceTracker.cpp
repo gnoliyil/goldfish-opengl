@@ -3123,7 +3123,7 @@ public:
                 directMappedAddr = (uint64_t)(uintptr_t)
                     mmap64(0, hvaSizeId[1], PROT_WRITE, MAP_SHARED, rendernodeFdForMem, map_info.offset);
 
-                if (!directMappedAddr) {
+                if ((void*)directMappedAddr == MAP_FAILED) {
                     ALOGE("%s: mmap of virtio gpu resource failed\n", __func__);
                     abort();
                 }
@@ -8423,6 +8423,9 @@ void ResourceTracker::transformImpl_VkExternalMemoryProperties_fromhost(
 
 void ResourceTracker::transformImpl_VkExternalMemoryProperties_tohost(
     VkExternalMemoryProperties*, uint32_t) {}
+
+void ResourceTracker::transformImpl_VkImageCreateInfo_tohost(VkImageCreateInfo*,
+                                                             uint32_t) {}
 
 #define DEFINE_TRANSFORMED_TYPE_IMPL(type)                                  \
     void ResourceTracker::transformImpl_##type##_tohost(type*, uint32_t) {} \
