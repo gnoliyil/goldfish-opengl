@@ -1231,8 +1231,7 @@ public:
         VkExternalMemoryHandleTypeFlags supportedHandleType = 0u;
 #ifdef VK_USE_PLATFORM_FUCHSIA
         supportedHandleType |=
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA |
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA;
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA;
 #endif  // VK_USE_PLATFORM_FUCHSIA
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
         supportedHandleType |=
@@ -1865,8 +1864,8 @@ public:
         using fuchsia_hardware_goldfish::wire::kMemoryPropertyDeviceLocal;
         using fuchsia_hardware_goldfish::wire::kMemoryPropertyHostVisible;
 
-        if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA &&
-            handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA) {
+        if (handleType !=
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA) {
             return VK_ERROR_INITIALIZATION_FAILED;
         }
 
@@ -3123,7 +3122,7 @@ public:
                 directMappedAddr = (uint64_t)(uintptr_t)
                     mmap64(0, hvaSizeId[1], PROT_WRITE, MAP_SHARED, rendernodeFdForMem, map_info.offset);
 
-                if (!directMappedAddr) {
+                if ((void*)directMappedAddr == MAP_FAILED) {
                     ALOGE("%s: mmap of virtio gpu resource failed\n", __func__);
                     abort();
                 }
@@ -3276,27 +3275,19 @@ public:
         const VkImportAndroidHardwareBufferInfoANDROID* importAhbInfoPtr =
             vk_find_struct<VkImportAndroidHardwareBufferInfoANDROID>(pAllocateInfo);
 
+#ifdef VK_USE_PLATFORM_FUCHSIA
         const VkImportMemoryBufferCollectionFUCHSIAX*
             importBufferCollectionInfoPtr =
                 vk_find_struct<VkImportMemoryBufferCollectionFUCHSIAX>(
                     pAllocateInfo);
 
-        // TODO(fxbug.dev/73447): remove this once we finish migration to
-        // FUCHSIAX.
-        if (!importBufferCollectionInfoPtr) {
-            importBufferCollectionInfoPtr =
-                reinterpret_cast<const VkImportMemoryBufferCollectionFUCHSIAX*>(
-                    vk_find_struct<VkImportMemoryBufferCollectionFUCHSIA>(
-                        pAllocateInfo));
-        }
-
         const VkImportMemoryZirconHandleInfoFUCHSIA* importVmoInfoPtr =
-            vk_find_struct<VkImportMemoryZirconHandleInfoFUCHSIA>(pAllocateInfo);
-        if (!importVmoInfoPtr) {
-            importVmoInfoPtr = reinterpret_cast<const VkImportMemoryZirconHandleInfoFUCHSIA*>(
-                __vk_find_struct(const_cast<void*>(pAllocateInfo->pNext),
-                    VK_STRUCTURE_TYPE_TEMP_IMPORT_MEMORY_ZIRCON_HANDLE_INFO_FUCHSIA));
-        }
+                vk_find_struct<VkImportMemoryZirconHandleInfoFUCHSIA>(
+                        pAllocateInfo);
+#else
+        const void* importBufferCollectionInfoPtr = nullptr;
+        const void* importVmoInfoPtr = nullptr;
+#endif  // VK_USE_PLATFORM_FUCHSIA
 
         const VkMemoryDedicatedAllocateInfo* dedicatedAllocInfoPtr =
             vk_find_struct<VkMemoryDedicatedAllocateInfo>(pAllocateInfo);
@@ -3352,11 +3343,10 @@ public:
             exportAhb =
                 exportAllocateInfoPtr->handleTypes &
                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
-            exportVmo =
-                (exportAllocateInfoPtr->handleTypes &
-                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA) ||
-                (exportAllocateInfoPtr->handleTypes &
-                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA);
+#ifdef VK_USE_PLATFORM_FUCHSIA
+            exportVmo = exportAllocateInfoPtr->handleTypes &
+                        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA;
+#endif  // VK_USE_PLATFORM_FUCHSIA
         } else if (importAhbInfoPtr) {
             importAhb = true;
         } else if (importBufferCollectionInfoPtr) {
@@ -3444,9 +3434,8 @@ public:
 
         zx_handle_t vmo_handle = ZX_HANDLE_INVALID;
 
-        if (importBufferCollection) {
-
 #ifdef VK_USE_PLATFORM_FUCHSIA
+        if (importBufferCollection) {
             const auto& collection = *reinterpret_cast<
                 fidl::WireSyncClient<fuchsia_sysmem::BufferCollection>*>(
                 importBufferCollectionInfoPtr->collection);
@@ -3464,15 +3453,12 @@ public:
                 _RETURN_FAILURE_WITH_DEVICE_MEMORY_REPORT(VK_ERROR_INITIALIZATION_FAILED);
             }
             vmo_handle = info.buffers[index].vmo.release();
-#endif
-
         }
 
         if (importVmo) {
             vmo_handle = importVmoInfoPtr->handle;
         }
 
-#ifdef VK_USE_PLATFORM_FUCHSIA
         if (exportVmo) {
             bool hasDedicatedImage = dedicatedAllocInfoPtr &&
                 (dedicatedAllocInfoPtr->image != VK_NULL_HANDLE);
@@ -4255,21 +4241,11 @@ public:
             extBufferCollectionPtr =
                 vk_find_struct<VkBufferCollectionImageCreateInfoFUCHSIAX>(
                     pCreateInfo);
-        if (extBufferCollectionPtr == nullptr) {
-            // TODO(fxbug.dev/73447): remove this once we finish migration to
-            // FUCHSIAX.
-            extBufferCollectionPtr = reinterpret_cast<
-                const VkBufferCollectionImageCreateInfoFUCHSIAX*>(
-                vk_find_struct<VkBufferCollectionImageCreateInfoFUCHSIA>(
-                    pCreateInfo));
-        }
         bool isSysmemBackedMemory = false;
 
         if (extImgCiPtr &&
-            ((extImgCiPtr->handleTypes &
-                VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA) ||
             (extImgCiPtr->handleTypes &
-                VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA))) {
+             VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA)) {
             isSysmemBackedMemory = true;
         }
 
@@ -5330,24 +5306,14 @@ public:
         const VkExternalMemoryBufferCreateInfo* extBufCiPtr =
             vk_find_struct<VkExternalMemoryBufferCreateInfo>(pCreateInfo);
         if (extBufCiPtr &&
-            ((extBufCiPtr->handleTypes &
-             VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA) ||
             (extBufCiPtr->handleTypes &
-             VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA))) {
+             VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA)) {
             isSysmemBackedMemory = true;
         }
 
         const auto* extBufferCollectionPtr =
             vk_find_struct<VkBufferCollectionBufferCreateInfoFUCHSIAX>(
                 pCreateInfo);
-        if (extBufferCollectionPtr == nullptr) {
-            // TODO(fxbug.dev/73447): Remove this once we finish migration to
-            // FUCHSIAX.
-            extBufferCollectionPtr = reinterpret_cast<
-                const VkBufferCollectionBufferCreateInfoFUCHSIAX*>(
-                vk_find_struct<VkBufferCollectionBufferCreateInfoFUCHSIA>(
-                    pCreateInfo));
-        }
 
         if (extBufferCollectionPtr) {
             const auto& collection = *reinterpret_cast<
@@ -5538,11 +5504,10 @@ public:
             vk_find_struct<VkExportSemaphoreCreateInfoKHR>(pCreateInfo);
 
 #ifdef VK_USE_PLATFORM_FUCHSIA
-        bool exportEvent = exportSemaphoreInfoPtr &&
-            ((exportSemaphoreInfoPtr->handleTypes &
-             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TEMP_ZIRCON_EVENT_BIT_FUCHSIA) ||
-            (exportSemaphoreInfoPtr->handleTypes &
-             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_ZIRCON_EVENT_BIT_FUCHSIA));
+        bool exportEvent =
+                exportSemaphoreInfoPtr &&
+                (exportSemaphoreInfoPtr->handleTypes &
+                 VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_ZIRCON_EVENT_BIT_FUCHSIA);
 
         if (exportEvent) {
             finalCreateInfo.pNext = nullptr;
@@ -6670,27 +6635,17 @@ public:
             const VkPhysicalDeviceExternalImageFormatInfo* ext_img_info =
                 vk_find_struct<VkPhysicalDeviceExternalImageFormatInfo>(pImageFormatInfo);
             if (ext_img_info) {
-                switch (static_cast<uint32_t>(ext_img_info->handleType)) {
-                case VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA:
+                if (static_cast<uint32_t>(ext_img_info->handleType) ==
+                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA) {
                     ext_img_properties->externalMemoryProperties = {
-                        .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
-                                                  VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
-                        .exportFromImportedHandleTypes =
-                            VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA,
-                        .compatibleHandleTypes =
-                            VK_EXTERNAL_MEMORY_HANDLE_TYPE_TEMP_ZIRCON_VMO_BIT_FUCHSIA,
+                            .externalMemoryFeatures =
+                                    VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
+                                    VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
+                            .exportFromImportedHandleTypes =
+                                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA,
+                            .compatibleHandleTypes =
+                                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA,
                     };
-                    break;
-                case VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA:
-                    ext_img_properties->externalMemoryProperties = {
-                        .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT |
-                                                  VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
-                        .exportFromImportedHandleTypes =
-                            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA,
-                        .compatibleHandleTypes =
-                            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ZIRCON_VMO_BIT_FUCHSIA,
-                    };
-                    break;
                 }
             }
         }
@@ -6734,16 +6689,6 @@ public:
         (void)pExternalSemaphoreInfo;
         (void)pExternalSemaphoreProperties;
 #ifdef VK_USE_PLATFORM_FUCHSIA
-        if (pExternalSemaphoreInfo->handleType ==
-            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TEMP_ZIRCON_EVENT_BIT_FUCHSIA) {
-            pExternalSemaphoreProperties->compatibleHandleTypes |=
-                VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TEMP_ZIRCON_EVENT_BIT_FUCHSIA;
-            pExternalSemaphoreProperties->exportFromImportedHandleTypes |=
-                VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TEMP_ZIRCON_EVENT_BIT_FUCHSIA;
-            pExternalSemaphoreProperties->externalSemaphoreFeatures |=
-                VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
-                VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
-        }
         if (pExternalSemaphoreInfo->handleType ==
             static_cast<uint32_t>(VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_ZIRCON_EVENT_BIT_FUCHSIA)) {
             pExternalSemaphoreProperties->compatibleHandleTypes |=
@@ -7809,87 +7754,6 @@ VkResult ResourceTracker::on_vkImportSemaphoreZirconHandleFUCHSIA(
     const VkImportSemaphoreZirconHandleInfoFUCHSIA* pInfo) {
     return mImpl->on_vkImportSemaphoreZirconHandleFUCHSIA(
         context, input_result, device, pInfo);
-}
-
-VkResult ResourceTracker::on_vkCreateBufferCollectionFUCHSIA(
-    void* context, VkResult input_result,
-    VkDevice device,
-    const VkBufferCollectionCreateInfoFUCHSIA* pInfo,
-    const VkAllocationCallbacks* pAllocator,
-    VkBufferCollectionFUCHSIA* pCollection) {
-    return mImpl->on_vkCreateBufferCollectionFUCHSIAX(
-        context, input_result, device,
-        reinterpret_cast<const VkBufferCollectionCreateInfoFUCHSIAX*>(pInfo),
-        pAllocator, reinterpret_cast<VkBufferCollectionFUCHSIAX*>(pCollection));
-}
-
-void ResourceTracker::on_vkDestroyBufferCollectionFUCHSIA(
-        void* context, VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        const VkAllocationCallbacks* pAllocator) {
-    return mImpl->on_vkDestroyBufferCollectionFUCHSIAX(
-        context, input_result, device,
-        reinterpret_cast<VkBufferCollectionFUCHSIAX>(collection), pAllocator);
-}
-
-VkResult ResourceTracker::on_vkSetBufferCollectionConstraintsFUCHSIA(
-        void* context, VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        const VkImageCreateInfo* pImageInfo) {
-    return mImpl->on_vkSetBufferCollectionConstraintsFUCHSIAX(
-        context, input_result, device,
-        reinterpret_cast<VkBufferCollectionFUCHSIAX>(collection), pImageInfo);
-}
-
-VkResult ResourceTracker::on_vkSetBufferCollectionBufferConstraintsFUCHSIA(
-    void* context,
-    VkResult input_result,
-    VkDevice device,
-    VkBufferCollectionFUCHSIA collection,
-    const VkBufferConstraintsInfoFUCHSIA* pBufferConstraintsInfo) {
-    return mImpl->on_vkSetBufferCollectionBufferConstraintsFUCHSIAX(
-        context, input_result, device,
-        reinterpret_cast<VkBufferCollectionFUCHSIAX>(collection),
-        reinterpret_cast<const VkBufferConstraintsInfoFUCHSIAX*>(
-            pBufferConstraintsInfo));
-}
-
-VkResult ResourceTracker::on_vkSetBufferCollectionImageConstraintsFUCHSIA(
-    void* context,
-    VkResult input_result,
-    VkDevice device,
-    VkBufferCollectionFUCHSIA collection,
-    const VkImageConstraintsInfoFUCHSIA* pImageConstraintsInfo) {
-    return mImpl->on_vkSetBufferCollectionImageConstraintsFUCHSIAX(
-        context, input_result, device,
-        reinterpret_cast<VkBufferCollectionFUCHSIAX>(collection),
-        reinterpret_cast<const VkImageConstraintsInfoFUCHSIAX*>(
-            pImageConstraintsInfo));
-}
-
-VkResult ResourceTracker::on_vkGetBufferCollectionPropertiesFUCHSIA(
-        void* context, VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        VkBufferCollectionPropertiesFUCHSIA* pProperties) {
-    return mImpl->on_vkGetBufferCollectionPropertiesFUCHSIAX(
-        context, input_result, device,
-        reinterpret_cast<VkBufferCollectionFUCHSIAX>(collection),
-        reinterpret_cast<VkBufferCollectionPropertiesFUCHSIAX*>(pProperties));
-}
-
-VkResult ResourceTracker::on_vkGetBufferCollectionProperties2FUCHSIA(
-    void* context,
-    VkResult input_result,
-    VkDevice device,
-    VkBufferCollectionFUCHSIA collection,
-    VkBufferCollectionProperties2FUCHSIA* pProperties) {
-    return mImpl->on_vkGetBufferCollectionProperties2FUCHSIAX(
-        context, input_result, device,
-        reinterpret_cast<VkBufferCollectionFUCHSIAX>(collection),
-        reinterpret_cast<VkBufferCollectionProperties2FUCHSIAX*>(pProperties));
 }
 
 VkResult ResourceTracker::on_vkCreateBufferCollectionFUCHSIAX(
