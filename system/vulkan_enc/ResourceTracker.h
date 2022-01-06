@@ -273,47 +273,6 @@ public:
         void* context, VkResult input_result,
         VkDevice device,
         const VkImportSemaphoreZirconHandleInfoFUCHSIA* pInfo);
-    // TODO(fxbug.dev/73447): Remove all the *FUCHSIA functions below once we
-    // finish migration to FUCHSIAX.
-    VkResult on_vkCreateBufferCollectionFUCHSIA(
-        void* context, VkResult input_result,
-        VkDevice device,
-        const VkBufferCollectionCreateInfoFUCHSIA* pInfo,
-        const VkAllocationCallbacks* pAllocator,
-        VkBufferCollectionFUCHSIA* pCollection);
-    void on_vkDestroyBufferCollectionFUCHSIA(
-        void* context, VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        const VkAllocationCallbacks* pAllocator);
-    VkResult on_vkSetBufferCollectionConstraintsFUCHSIA(
-        void* context, VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        const VkImageCreateInfo* pImageInfo);
-    VkResult on_vkSetBufferCollectionBufferConstraintsFUCHSIA(
-        void* context,
-        VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        const VkBufferConstraintsInfoFUCHSIA* pBufferConstraintsInfo);
-    VkResult on_vkSetBufferCollectionImageConstraintsFUCHSIA(
-        void* context,
-        VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        const VkImageConstraintsInfoFUCHSIA* pImageConstraintsInfo);
-    VkResult on_vkGetBufferCollectionPropertiesFUCHSIA(
-        void* context, VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        VkBufferCollectionPropertiesFUCHSIA* pProperties);
-    VkResult on_vkGetBufferCollectionProperties2FUCHSIA(
-        void* context,
-        VkResult input_result,
-        VkDevice device,
-        VkBufferCollectionFUCHSIA collection,
-        VkBufferCollectionProperties2FUCHSIA* pProperties);
     VkResult on_vkCreateBufferCollectionFUCHSIAX(
         void* context,
         VkResult input_result,
@@ -682,6 +641,7 @@ public:
     void transformImpl_VkExternalMemoryProperties_tohost(
         VkExternalMemoryProperties* pProperties,
         uint32_t);
+    void transformImpl_VkImageCreateInfo_tohost(VkImageCreateInfo*, uint32_t);
 
 #define DEFINE_TRANSFORMED_TYPE_PROTOTYPE(type)          \
     void transformImpl_##type##_tohost(type*, uint32_t); \
